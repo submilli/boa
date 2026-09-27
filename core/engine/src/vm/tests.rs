@@ -10,6 +10,7 @@ use boa_ast::Position;
 use boa_macros::js_str;
 use boa_parser::Source;
 use indoc::indoc;
+use std::fmt::Write;
 
 #[test]
 fn typeof_string() {
@@ -577,5 +578,112 @@ fn proxy_chains_count_toward_the_recursion_limit() {
             "#},
             true,
         ),
+    ]);
+}
+
+#[test]
+fn value_stack_overflow_is_catchable_and_recovers() {
+    // Frames with many locals fill the value stack before the call depth
+    // limit. The RangeError must be catchable, and once it is caught the
+    // stack must be back to the catching frame's size, so later calls in the
+    // same script and in later scripts still work.
+    let locals = (0..50).fold(String::new(), |mut locals, i| {
+        write!(locals, "let v{i} = {i};").expect("writing to a String cannot fail");
+        locals
+    });
+    run_test_actions([
+        TestAction::inspect_context(|context| {
+            context.runtime_limits_mut().set_stack_size_limit(10_000);
+        }),
+        TestAction::run(format!(
+            "function deep() {{ {locals} return deep() + v0 }}\nfunction one() {{ return 1 }}"
+        )),
+        TestAction::assert_eq(
+            indoc! {r#"
+                let caught;
+                try { deep() } catch (e) { caught = e instanceof RangeError && one() }
+                caught
+            "#},
+            1,
+        ),
+        TestAction::assert_eq("one()", 1),
+        TestAction::assert_native_error(
+            "deep()",
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
+        ),
+        TestAction::assert_eq("one()", 1),
+        TestAction::assert_eq(
+            indoc! {r#"
+                let calls = 0;
+                for (let i = 0; i < 100; i++) {
+                    try { deep() } catch { calls += one() }
+                }
+                calls
+            "#},
+            100,
+        ),
+    ]);
+}
+
+#[test]
+fn return_value_survives_an_exception_caught_in_finally() {
+    // A `return` inside `try` keeps its value on the stack while `finally`
+    // runs; catching an exception inside that `finally` must not drop it.
+    run_test_actions([
+        TestAction::assert_eq(
+            "(function () { try { return 42 } finally { try { throw 1 } catch {} } })()",
+            42,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                (function () {
+                    let a = 7;
+                    try { return a + 1 } finally { try { null.x } catch (e) {} }
+                })()
+            "#},
+            8,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                (function () {
+                    for (const x of [1, 2]) {
+                        try { return x * 10 } finally { try { throw 0 } catch {} }
+                    }
+                })()
+            "#},
+            10,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                function* gen() { try { return 5 } finally { try { yield 1 } catch (e) {} } }
+                const it = gen();
+                it.next();
+                it.throw(new Error('x')).value
+            "#},
+            5,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                class Base {}
+                class Derived extends Base {
+                    constructor() {
+                        super();
+                        try { return { v: 42 } } finally { try { throw 1 } catch {} }
+                    }
+                }
+                new Derived().v
+            "#},
+            42,
+        ),
+        TestAction::run(indoc! {r#"
+            let resolved;
+            (async function () { try { return 42 } finally { try { throw 1 } catch {} } })()
+                .then((value) => { resolved = value });
+        "#}),
+        TestAction::inspect_context(|context| {
+            context.run_jobs().expect("jobs run");
+        }),
+        TestAction::assert_eq("resolved", 42),
     ]);
 }

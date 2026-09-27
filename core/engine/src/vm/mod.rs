@@ -925,10 +925,22 @@ impl Context {
             let exit_early = self.vm.frame().exit_early();
 
             if self.vm.handle_exception_at(pc) {
+                // The handling frame's own values stay (a `return` pending
+                // through a `finally` keeps its value on the stack); the
+                // unwound frames' values, from the failed call's `this`
+                // onwards, are dropped. Leaving them would leak stack space,
+                // so that after the stack size limit is hit every later call
+                // fails again.
+                self.vm.stack.truncate_to_frame(&frame);
                 return ControlFlow::Continue(());
             }
 
             if exit_early {
+                // As when the error is thrown in this frame (above): leave
+                // no values from the unwound frames behind.
+                self.vm.frame_mut().environments.truncate(env_fp as usize);
+                let frame = self.vm.frames.last().expect("frame must exist");
+                self.vm.stack.truncate_to_frame(frame);
                 return ControlFlow::Break(CompletionRecord::Throw(
                     self.vm
                         .pending_exception
