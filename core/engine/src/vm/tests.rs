@@ -1,9 +1,10 @@
 use crate::error::RuntimeLimitError;
+use crate::object::builtins::JsProxy;
 use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeErrorKind, JsValue, NativeFunction, TestAction, js_string,
+    Context, JsNativeErrorKind, JsObject, JsValue, NativeFunction, TestAction, js_string,
     property::Attribute, run_test_actions, run_test_actions_with,
 };
 use boa_ast::Position;
@@ -579,6 +580,89 @@ fn proxy_chains_count_toward_the_recursion_limit() {
             true,
         ),
     ]);
+}
+
+/// Run `test` on a thread with 8 mebibytes of native stack, the size embedders
+/// commonly give script; without the limit, the recursion below overflows
+/// it and aborts the process.
+fn on_script_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(test)
+        .expect("the test thread starts")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+#[test]
+fn native_functions_calling_back_count_toward_the_recursion_limit() {
+    // A native function that calls itself through `JsObject::call` never
+    // runs bytecode, so only the host call depth can stop it.
+    on_script_stack(|| {
+        let context = &mut Context::default();
+        context
+            .register_global_callable(
+                js_string!("reenter"),
+                0,
+                NativeFunction::from_copy_closure(|_, _, context| {
+                    let this = context
+                        .global_object()
+                        .get(js_string!("reenter"), context)?;
+                    let this = this.as_callable().expect("reenter is callable");
+                    this.call(&JsValue::undefined(), &[], context)
+                }),
+            )
+            .expect("the global is new");
+        let result = context
+            .eval(Source::from_bytes(
+                "let caught; try { reenter() } catch (e) { caught = e instanceof RangeError } caught",
+            ))
+            .expect("the RangeError is caught");
+        assert_eq!(result, JsValue::from(true));
+    });
+}
+
+#[test]
+fn a_native_proxy_trap_forwarding_through_reflect_in_a_cycle_is_a_range_error() {
+    // An embedder's proxy trap forwarding to `Reflect.get`, with the proxy
+    // in its own target's prototype chain: each level is a proxy method and
+    // two native calls. The limit is an embedder's (the default stops
+    // this recursion before it reaches the native stack's end anyway).
+    on_script_stack(|| {
+        let context = &mut Context::default();
+        context.runtime_limits_mut().set_recursion_limit(5_000);
+        let reflect_get = context
+            .intrinsics()
+            .objects()
+            .reflect()
+            .get(js_string!("get"), context)
+            .expect("Reflect.get exists");
+        context
+            .register_global_property(js_string!("reflectGet"), reflect_get, Attribute::all())
+            .expect("the global is new");
+        let target = JsObject::with_object_proto(context.intrinsics());
+        let proxy = JsProxy::builder(target.clone())
+            .get(|_, args, context| {
+                let forward = context
+                    .global_object()
+                    .get(js_string!("reflectGet"), context)?;
+                let forward = forward.as_callable().expect("Reflect.get is callable");
+                forward.call(&JsValue::undefined(), args, context)
+            })
+            .build(context)
+            .expect("the proxy builds");
+        let proxy = JsObject::from(proxy);
+        target.set_prototype(Some(proxy.clone()));
+        context
+            .register_global_property(js_string!("cycle"), proxy, Attribute::all())
+            .expect("the global is new");
+        let result = context
+            .eval(Source::from_bytes(
+                "let caught; try { cycle.missing } catch (e) { caught = e instanceof RangeError } caught",
+            ))
+            .expect("the RangeError is caught");
+        assert_eq!(result, JsValue::from(true));
+    });
 }
 
 #[test]
