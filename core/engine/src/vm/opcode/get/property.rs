@@ -12,7 +12,9 @@ use crate::{
 fn cannot_read(base: &JsValue, key: &str) -> crate::JsError {
     let base = if base.is_null() { "null" } else { "undefined" };
     crate::JsNativeError::typ()
-        .with_message(format!("Cannot read properties of {base} (reading '{key}')"))
+        .with_message(format!(
+            "Cannot read properties of {base} (reading '{key}')"
+        ))
         .into()
 }
 
@@ -45,7 +47,9 @@ fn get_by_name<const LENGTH: bool>(
     //    To prevent the creation of a temporary JsObject, we directly retrieve the prototype that
     //    `to_object()` would produce, such as `Number.prototype`, `String.prototype`, etc.
     if object.is_null_or_undefined() {
-        let name = context.vm.frame().code_block().ic[usize::from(index)].name.clone();
+        let name = context.vm.frame().code_block().ic[usize::from(index)]
+            .name
+            .clone();
         return Err(cannot_read(object, &name.to_std_string_escaped()));
     }
     let object = object.base_class(context)?;
@@ -105,7 +109,10 @@ fn get_by_value<const PUSH_KEY: bool>(
     let key_value = context.vm.get_register(key.into()).clone();
     let base = context.vm.get_register(object.into()).clone();
     if base.is_null_or_undefined() {
-        let key = key_value.to_string(context).map(|k| k.to_std_string_escaped()).unwrap_or_default();
+        let key = key_value
+            .to_string(context)
+            .map(|k| k.to_std_string_escaped())
+            .unwrap_or_default();
         return Err(cannot_read(&base, &key));
     }
     let object = base.base_class(context)?;

@@ -63,7 +63,10 @@ impl ShadowEntry {
     pub(crate) fn v8_frame(&self) -> String {
         match self {
             ShadowEntry::Native { function_name, .. } => {
-                let name = function_name.as_ref().map_or_else(|| "<anonymous>".to_string(), JsString::to_std_string_escaped);
+                let name = function_name.as_ref().map_or_else(
+                    || "<anonymous>".to_string(),
+                    JsString::to_std_string_escaped,
+                );
                 format!("{name} (<anonymous>)")
             }
             ShadowEntry::Bytecode { pc, source_info } => {
@@ -72,11 +75,19 @@ impl ShadowEntry {
                     _ => "<anonymous>".to_string(),
                 };
                 let location = match source_info.map().find(*pc) {
-                    Some(position) => format!("{path}:{}:{}", position.line_number(), position.column_number()),
+                    Some(position) => format!(
+                        "{path}:{}:{}",
+                        position.line_number(),
+                        position.column_number()
+                    ),
                     None => path,
                 };
                 let name = source_info.function_name().to_std_string_escaped();
-                if name.is_empty() { location } else { format!("{name} ({location})") }
+                if name.is_empty() {
+                    location
+                } else {
+                    format!("{name} ({location})")
+                }
             }
         }
     }

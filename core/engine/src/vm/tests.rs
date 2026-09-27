@@ -360,7 +360,11 @@ fn recursion_runtime_limit() {
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(10);
         }),
-        TestAction::assert_native_error("factorial(11)", JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
+        TestAction::assert_native_error(
+            "factorial(11)",
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
+        ),
         TestAction::assert_eq("factorial(8)", JsValue::new(40_320)),
         TestAction::assert_native_error(
             indoc! {r#"
@@ -369,7 +373,10 @@ fn recursion_runtime_limit() {
                 }
 
                 x()
-            "#}, JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
+            "#},
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
+        ),
     ]);
 }
 
@@ -525,7 +532,10 @@ fn recursion_in_setter_throws_range_error() {
                   },
                 };
                 obj.x = 1;
-            "#}, JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
+            "#},
+            JsNativeErrorKind::Range,
+            "Maximum call stack size exceeded",
+        ),
     ]);
 }
 

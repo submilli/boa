@@ -651,7 +651,12 @@ pub(super) fn time_zone_string(t: f64, hooks: &dyn HostHooks) -> JsString {
     // Browsers name the zone; UTC (the only zone without a host time zone
     // database) as V8 does.
     if offset == 0.0 {
-        return js_string!(offset_sign, offset_hour, offset_min, js_str!(" (Coordinated Universal Time)"));
+        return js_string!(
+            offset_sign,
+            offset_hour,
+            offset_min,
+            js_str!(" (Coordinated Universal Time)")
+        );
     }
     js_string!(offset_sign, offset_hour, offset_min)
 }

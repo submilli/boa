@@ -691,9 +691,8 @@ pub(crate) fn create_date_time_format(
     // Report IANA names (not the BCP 47 ids ICU uses internally), with the
     // UTC aliases canonicalized as browsers do.
     let time_zone_name = match time_zone_string.to_ascii_lowercase().as_str() {
-        "utc" | "etc/utc" | "etc/gmt" | "gmt" | "etc/uct" | "uct" | "etc/zulu" | "zulu" | "etc/universal" | "universal" => {
-            "UTC".to_string()
-        }
+        "utc" | "etc/utc" | "etc/gmt" | "gmt" | "etc/uct" | "uct" | "etc/zulu" | "zulu"
+        | "etc/universal" | "universal" => "UTC".to_string(),
         _ => time_zone_string.clone(),
     };
     // Note: Should a timezone enum be part of temporal_rs, icu_time, or an ECMA402 wrapper lib

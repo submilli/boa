@@ -853,9 +853,9 @@ impl From<RuntimeLimitError> for JsError {
             // Too-deep recursion is an ordinary, catchable `RangeError` in
             // browsers, and scripts rely on catching it. Unwinding frees the
             // stack, so catching it cannot hide a runaway script.
-            RuntimeLimitError::Recursion | RuntimeLimitError::StackSize => {
-                JsNativeError::range().with_message("Maximum call stack size exceeded").into()
-            }
+            RuntimeLimitError::Recursion | RuntimeLimitError::StackSize => JsNativeError::range()
+                .with_message("Maximum call stack size exceeded")
+                .into(),
             RuntimeLimitError::LoopIteration => EngineError::from(value).into(),
         }
     }

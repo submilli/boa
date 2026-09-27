@@ -594,7 +594,8 @@ impl<'ast> VisitorMut<'ast> for BindingCollectorVisitor<'_> {
         // NOTE: Arrow functions inherit 'this' from their enclosing scope, so we must escape it
         // in the function that provides it: the nearest one that is not an arrow.
         if self.arrow_depth > 0 {
-            self.scope.escape_this_in_enclosing_function_scope(self.arrow_depth);
+            self.scope
+                .escape_this_in_enclosing_function_scope(self.arrow_depth);
         }
         ControlFlow::Continue(())
     }

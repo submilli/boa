@@ -205,7 +205,11 @@ impl IntrinsicObject for Error {
 
         // V8's stack-trace API, which libraries and feature probes use.
         let builder = builder
-            .static_method(Self::capture_stack_trace, js_string!("captureStackTrace"), 2)
+            .static_method(
+                Self::capture_stack_trace,
+                js_string!("captureStackTrace"),
+                2,
+            )
             .static_property(
                 js_string!("stackTraceLimit"),
                 10,
@@ -343,9 +347,17 @@ impl Error {
     /// stack trace.
     fn stack_header(object: &JsObject, context: &mut Context) -> JsResult<String> {
         let name = object.get(js_string!("name"), context)?;
-        let name = if name.is_undefined() { "Error".to_string() } else { name.to_string(context)?.to_std_string_escaped() };
+        let name = if name.is_undefined() {
+            "Error".to_string()
+        } else {
+            name.to_string(context)?.to_std_string_escaped()
+        };
         let message = object.get(js_string!("message"), context)?;
-        let message = if message.is_undefined() { String::new() } else { message.to_string(context)?.to_std_string_escaped() };
+        let message = if message.is_undefined() {
+            String::new()
+        } else {
+            message.to_string(context)?.to_std_string_escaped()
+        };
         Ok(match (name.is_empty(), message.is_empty()) {
             (_, true) => name,
             (true, false) => message,
@@ -362,7 +374,13 @@ impl Error {
             .get(js_string!("stackTraceLimit"), context)
             .ok()
             .and_then(|v| v.as_number())
-            .map_or(10, |n| if n.is_finite() { n.max(0.0) as usize } else { usize::MAX });
+            .map_or(10, |n| {
+                if n.is_finite() {
+                    n.max(0.0) as usize
+                } else {
+                    usize::MAX
+                }
+            });
         frames.iter().take(limit).fold(header, |mut output, frame| {
             let _ = write!(&mut output, "\n    at {frame}");
             output
@@ -371,7 +389,11 @@ impl Error {
 
     /// `Error.captureStackTrace(object [, constructorOpt])` (V8): gives
     /// `object` a `stack` property describing the current call stack.
-    fn capture_stack_trace(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    fn capture_stack_trace(
+        _: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
         let Some(object) = args.first().and_then(JsValue::as_object) else {
             return Err(JsNativeError::typ().with_message("Invalid argument").into());
         };
