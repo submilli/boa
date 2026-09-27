@@ -36,6 +36,7 @@ use crate::{
     realm::Realm,
     string::StaticJsStrings,
 };
+use cow_utils::CowUtils;
 
 use boa_gc::{Finalize, Trace};
 use icu_calendar::{Iso, preferences::CalendarAlgorithm};
@@ -690,7 +691,7 @@ pub(crate) fn create_date_time_format(
     let time_zone_string = time_zone.to_std_string_escaped();
     // Report IANA names (not the BCP 47 ids ICU uses internally), with the
     // UTC aliases canonicalized as browsers do.
-    let time_zone_name = match time_zone_string.to_ascii_lowercase().as_str() {
+    let time_zone_name = match time_zone_string.cow_to_ascii_lowercase().as_ref() {
         "utc" | "etc/utc" | "etc/gmt" | "gmt" | "etc/uct" | "uct" | "etc/zulu" | "zulu"
         | "etc/universal" | "universal" => "UTC".to_string(),
         _ => time_zone_string.clone(),
