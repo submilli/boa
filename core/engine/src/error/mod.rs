@@ -849,7 +849,15 @@ impl From<EngineError> for JsError {
 
 impl From<RuntimeLimitError> for JsError {
     fn from(value: RuntimeLimitError) -> Self {
-        EngineError::from(value).into()
+        match value {
+            // Too-deep recursion is an ordinary, catchable `RangeError` in
+            // browsers, and scripts rely on catching it. Unwinding frees the
+            // stack, so catching it cannot hide a runaway script.
+            RuntimeLimitError::Recursion | RuntimeLimitError::StackSize => {
+                JsNativeError::range().with_message("Maximum call stack size exceeded").into()
+            }
+            RuntimeLimitError::LoopIteration => EngineError::from(value).into(),
+        }
     }
 }
 

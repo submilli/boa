@@ -360,18 +360,16 @@ fn recursion_runtime_limit() {
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(10);
         }),
-        TestAction::assert_runtime_limit_error("factorial(11)", RuntimeLimitError::Recursion),
+        TestAction::assert_native_error("factorial(11)", JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
         TestAction::assert_eq("factorial(8)", JsValue::new(40_320)),
-        TestAction::assert_runtime_limit_error(
+        TestAction::assert_native_error(
             indoc! {r#"
                 function x() {
                     x()
                 }
 
                 x()
-            "#},
-            RuntimeLimitError::Recursion,
-        ),
+            "#}, JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
     ]);
 }
 
@@ -495,32 +493,31 @@ fn long_object_chain_gc_trace_stack_overflow() {
 
 // See: https://github.com/boa-dev/boa/issues/4515
 #[test]
-fn recursion_in_async_gen_throws_uncatchable_error() {
+fn recursion_in_async_gen_rejects_with_range_error() {
+    // The RangeError is thrown while resolving the return value, so (as in
+    // browsers) it rejects the returned promise instead of escaping.
     run_test_actions([
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(128);
         }),
-        TestAction::assert_runtime_limit_error(
-            indoc! {r#"
-                async function* f() {}
-                f().return({
-                  get then() {
-                    this.then;
-                  },
-                });
-            "#},
-            RuntimeLimitError::Recursion,
-        ),
+        TestAction::assert(indoc! {r#"
+            async function* f() {}
+            f().return({
+              get then() {
+                this.then;
+              },
+            }) instanceof Promise
+        "#}),
     ]);
 }
 
 #[test]
-fn recursion_in_setter_throws_uncatchable_error() {
+fn recursion_in_setter_throws_range_error() {
     run_test_actions([
         TestAction::inspect_context(|context| {
             context.runtime_limits_mut().set_recursion_limit(128);
         }),
-        TestAction::assert_runtime_limit_error(
+        TestAction::assert_native_error(
             indoc! {r#"
                 const obj = {
                   set x(value) {
@@ -528,8 +525,47 @@ fn recursion_in_setter_throws_uncatchable_error() {
                   },
                 };
                 obj.x = 1;
+            "#}, JsNativeErrorKind::Range, "Maximum call stack size exceeded"),
+    ]);
+}
+
+#[test]
+fn stack_overflow_is_a_catchable_range_error() {
+    run_test_actions([
+        TestAction::inspect_context(|context| {
+            context.runtime_limits_mut().set_recursion_limit(128);
+        }),
+        TestAction::assert_eq(
+            indoc! {r#"
+                function f() { f() }
+                let caught;
+                try { f() } catch (e) { caught = e instanceof RangeError && e.message }
+                caught
             "#},
-            RuntimeLimitError::Recursion,
+            js_string!("Maximum call stack size exceeded"),
+        ),
+    ]);
+}
+
+#[test]
+fn proxy_chains_count_toward_the_recursion_limit() {
+    // A proxy whose target's prototype is the proxy itself forwards [[Get]]
+    // forever without calling JS; it must fail with a RangeError rather than
+    // overflow the native stack.
+    run_test_actions([
+        TestAction::inspect_context(|context| {
+            context.runtime_limits_mut().set_recursion_limit(128);
+        }),
+        TestAction::assert_eq(
+            indoc! {r#"
+                const target = {};
+                const proxy = new Proxy(target, {});
+                Object.setPrototypeOf(target, proxy);
+                let caught;
+                try { proxy.missing } catch (e) { caught = e instanceof RangeError }
+                caught
+            "#},
+            true,
         ),
     ]);
 }

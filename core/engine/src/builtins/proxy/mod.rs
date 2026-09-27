@@ -259,6 +259,10 @@ pub(crate) fn proxy_exotic_get_prototype_of(
     obj: &JsObject,
     context: &mut Context,
 ) -> JsResult<JsPrototype> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -307,6 +311,9 @@ pub(crate) fn proxy_exotic_get_prototype_of(
 
     // 13. Return handlerProto.
     Ok(handler_proto)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.2 [[SetPrototypeOf]] ( V )`
@@ -320,6 +327,10 @@ pub(crate) fn proxy_exotic_set_prototype_of(
     val: JsPrototype,
     context: &mut Context,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -370,6 +381,9 @@ pub(crate) fn proxy_exotic_set_prototype_of(
 
     // 13. Return true.
     Ok(true)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.3 [[IsExtensible]] ( )`
@@ -379,6 +393,10 @@ pub(crate) fn proxy_exotic_set_prototype_of(
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-isextensible
 pub(crate) fn proxy_exotic_is_extensible(obj: &JsObject, context: &mut Context) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -412,6 +430,9 @@ pub(crate) fn proxy_exotic_is_extensible(obj: &JsObject, context: &mut Context) 
 
     // 10. Return booleanTrapResult.
     Ok(boolean_trap_result)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.4 [[PreventExtensions]] ( )`
@@ -424,6 +445,10 @@ pub(crate) fn proxy_exotic_prevent_extensions(
     obj: &JsObject,
     context: &mut Context,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -456,6 +481,9 @@ pub(crate) fn proxy_exotic_prevent_extensions(
 
     // 9. Return booleanTrapResult.
     Ok(boolean_trap_result)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.5 [[GetOwnProperty]] ( P )`
@@ -469,6 +497,10 @@ pub(crate) fn proxy_exotic_get_own_property(
     key: &PropertyKey,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<Option<PropertyDescriptor>> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
 
     // 1. Let handler be O.[[ProxyHandler]].
@@ -580,6 +612,9 @@ pub(crate) fn proxy_exotic_get_own_property(
 
     // 17. Return resultDesc.
     Ok(Some(result_desc))
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.6 [[DefineOwnProperty]] ( P, Desc )`
@@ -594,6 +629,10 @@ pub(crate) fn proxy_exotic_define_own_property(
     desc: PropertyDescriptor,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
 
     // 1. Let handler be O.[[ProxyHandler]].
@@ -693,6 +732,9 @@ pub(crate) fn proxy_exotic_define_own_property(
 
     // 16. Return true.
     Ok(true)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.7 [[HasProperty]] ( P )`
@@ -706,6 +748,10 @@ pub(crate) fn proxy_exotic_has_property(
     key: &PropertyKey,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
 
     // 1. Let handler be O.[[ProxyHandler]].
@@ -759,6 +805,9 @@ pub(crate) fn proxy_exotic_has_property(
 
     // 9. Return booleanTrapResult.
     Ok(boolean_trap_result)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// Internal optimization method for `Proxy` exotic objects.
@@ -777,12 +826,19 @@ pub(crate) fn proxy_exotic_try_get(
     receiver: JsValue,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<Option<JsValue>> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // Note: For now, this just calls the normal methods. Could be optimized further.
     if proxy_exotic_has_property(obj, key, context)? {
         Ok(Some(proxy_exotic_get(obj, key, receiver, context)?))
     } else {
         Ok(None)
     }
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.8 [[Get]] ( P, Receiver )`
@@ -797,6 +853,10 @@ pub(crate) fn proxy_exotic_get(
     receiver: JsValue,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<JsValue> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // Proxy object can't be cached.
     context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
 
@@ -853,6 +913,9 @@ pub(crate) fn proxy_exotic_get(
 
     // 10. Return trapResult.
     Ok(trap_result)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.9 [[Set]] ( P, V, Receiver )`
@@ -868,6 +931,10 @@ pub(crate) fn proxy_exotic_set(
     receiver: JsValue,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
 
     // 1. Let handler be O.[[ProxyHandler]].
@@ -937,6 +1004,9 @@ pub(crate) fn proxy_exotic_set(
 
     // 11. Return true.
     Ok(true)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.10 [[Delete]] ( P )`
@@ -950,6 +1020,10 @@ pub(crate) fn proxy_exotic_delete(
     key: &PropertyKey,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<bool> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -1003,6 +1077,9 @@ pub(crate) fn proxy_exotic_delete(
 
     // 14. Return true.
     Ok(true)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.11 [[OwnPropertyKeys]] ( )`
@@ -1015,6 +1092,10 @@ pub(crate) fn proxy_exotic_own_property_keys(
     obj: &JsObject,
     context: &mut Context,
 ) -> JsResult<Vec<PropertyKey>> {
+    // A chain of proxies without traps recurses natively (each forwards
+    // to its target), so it counts toward the recursion limit.
+    enter_proxy(context)?;
+    let result = (|| {
     // 1. Let handler be O.[[ProxyHandler]].
     // 2. If handler is null, throw a TypeError exception.
     // 3. Assert: Type(handler) is Object.
@@ -1136,6 +1217,9 @@ pub(crate) fn proxy_exotic_own_property_keys(
 
     // 23. Return trapResult.
     Ok(trap_result)
+})();
+    context.vm.host_call_depth = context.vm.host_call_depth.saturating_sub(1);
+    result
 }
 
 /// `10.5.12 [[Call]] ( thisArgument, argumentsList )`
@@ -1246,3 +1330,12 @@ fn proxy_exotic_construct(
 
 #[cfg(test)]
 mod tests;
+
+/// Count a proxy internal method as a nested call, failing (as a catchable
+/// `RangeError`) past the recursion limit. Callers decrement
+/// `host_call_depth` when done.
+fn enter_proxy(context: &mut Context) -> JsResult<()> {
+    context.check_runtime_limits()?;
+    context.vm.host_call_depth += 1;
+    Ok(())
+}
