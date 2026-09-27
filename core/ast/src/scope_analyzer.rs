@@ -50,7 +50,7 @@ where
     let mut visitor = BindingCollectorVisitor {
         strict,
         eval,
-        in_arrow: false,
+        arrow_depth: 0,
         scope: scope.clone(),
         interner,
     };
@@ -578,7 +578,9 @@ struct BindingCollectorVisitor<'interner> {
     strict: bool,
     eval: bool,
     scope: Scope,
-    in_arrow: bool,
+    /// How many arrow functions enclose the current position since the
+    /// nearest non-arrow function.
+    arrow_depth: u32,
     interner: &'interner Interner,
 }
 
@@ -589,9 +591,10 @@ impl<'ast> VisitorMut<'ast> for BindingCollectorVisitor<'_> {
         &mut self,
         _node: &'ast mut crate::expression::This,
     ) -> ControlFlow<Self::BreakTy> {
-        // NOTE: Arrow functions inherit 'this' from their enclosing scope, so we must escape it.
-        if self.in_arrow {
-            self.scope.escape_this_in_enclosing_function_scope();
+        // NOTE: Arrow functions inherit 'this' from their enclosing scope, so we must escape it
+        // in the function that provides it: the nearest one that is not an arrow.
+        if self.arrow_depth > 0 {
+            self.scope.escape_this_in_enclosing_function_scope(self.arrow_depth);
         }
         ControlFlow::Continue(())
     }
@@ -850,9 +853,12 @@ impl<'ast> VisitorMut<'ast> for BindingCollectorVisitor<'_> {
                 self.visit_property_name_mut(&mut field.name)?;
                 let mut scope = Scope::new(self.scope.clone(), true);
                 std::mem::swap(&mut self.scope, &mut scope);
+                // An initializer has its own `this` (the instance or class).
+                let arrow_depth = std::mem::take(&mut self.arrow_depth);
                 if let Some(e) = &mut field.initializer {
                     self.visit_expression_mut(e)?;
                 }
+                self.arrow_depth = arrow_depth;
                 std::mem::swap(&mut self.scope, &mut scope);
                 field.scope = scope;
                 ControlFlow::Continue(())
@@ -861,9 +867,12 @@ impl<'ast> VisitorMut<'ast> for BindingCollectorVisitor<'_> {
             | ClassElement::PrivateStaticFieldDefinition(field) => {
                 let mut scope = Scope::new(self.scope.clone(), true);
                 std::mem::swap(&mut self.scope, &mut scope);
+                // An initializer has its own `this` (the instance or class).
+                let arrow_depth = std::mem::take(&mut self.arrow_depth);
                 if let Some(e) = &mut field.initializer {
                     self.visit_expression_mut(e)?;
                 }
+                self.arrow_depth = arrow_depth;
                 std::mem::swap(&mut self.scope, &mut scope);
                 field.scope = scope;
                 ControlFlow::Continue(())
@@ -1180,8 +1189,8 @@ impl BindingCollectorVisitor<'_> {
         arrow: bool,
     ) -> ControlFlow<&'static str> {
         let strict = self.strict || strict;
-        let old_in_arrow = self.in_arrow;
-        self.in_arrow = arrow;
+        let old_arrow_depth = self.arrow_depth;
+        self.arrow_depth = if arrow { old_arrow_depth + 1 } else { 0 };
 
         let function_scope = if let Some(name) = name {
             let scope = Scope::new(self.scope.clone(), false);
@@ -1215,7 +1224,7 @@ impl BindingCollectorVisitor<'_> {
 
         *scopes = function_scopes;
 
-        self.in_arrow = old_in_arrow;
+        self.arrow_depth = old_arrow_depth;
 
         ControlFlow::Continue(())
     }

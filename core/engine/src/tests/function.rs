@@ -324,3 +324,42 @@ fn function_constructor_nested_lexical_binding() {
         42,
     )]);
 }
+
+#[test]
+fn nested_arrows_keep_the_enclosing_this() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            const o = {};
+            function f() { return (() => () => this)(); }
+            f.call(o)() === o
+        "#}),
+        TestAction::assert(indoc! {r#"
+            class B { m() { return (() => () => this)(); } }
+            const b = new B();
+            b.m()() === b
+        "#}),
+        TestAction::assert_eq(
+            indoc! {r#"
+                class A { #m = 1; f() { return (() => () => this.#m)(); } }
+                new A().f()()
+            "#},
+            1,
+        ),
+    ]);
+}
+
+#[test]
+fn arrows_in_class_fields_inside_arrows_use_the_instance() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            const make = () => class { x = () => () => this; #y = 2; get y() { return (() => () => this.#y)()(); } };
+            const C = make();
+            const c = new C();
+            c.x()() === c && c.y === 2
+        "#}),
+        TestAction::assert(indoc! {r#"
+            const o = { m() { return () => { const inner = () => this; return inner(); }; } };
+            o.m()() === o
+        "#}),
+    ]);
+}
