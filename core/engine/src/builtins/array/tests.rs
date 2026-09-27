@@ -985,3 +985,44 @@ fn array_prototype_find_edge_cases() {
         "#}),
     ]);
 }
+
+#[test]
+fn sort_tolerates_inconsistent_comparators() {
+    run_test_actions([
+        // A random comparator (a common shuffle) must not fail, and must keep
+        // every element.
+        TestAction::assert(indoc! {r#"
+            const a = Array.from({ length: 200 }, (_, i) => i);
+            a.sort(() => Math.random() - 0.5);
+            a.length === 200 && [...a].sort((x, y) => x - y).every((v, i) => v === i)
+        "#}),
+        // Always "less": inconsistent, still a permutation.
+        TestAction::assert(indoc! {r#"
+            const b = [5, 3, 9, 1, 7, 2, 8, 6, 4, 0, 11, 10];
+            b.sort(() => -1);
+            b.length === 12 && [...b].sort((x, y) => x - y).join() === "0,1,2,3,4,5,6,7,8,9,10,11"
+        "#}),
+    ]);
+}
+
+#[test]
+fn sort_is_stable_and_stops_at_the_first_error() {
+    run_test_actions([
+        TestAction::assert_eq(
+            indoc! {r#"
+                const people = Array.from({ length: 40 }, (_, i) => ({ age: i % 3, id: i }));
+                people.sort((a, b) => a.age - b.age);
+                people.every((p, i) => i === 0 || people[i - 1].age < p.age || people[i - 1].id < p.id)
+            "#},
+            true,
+        ),
+        TestAction::assert_eq(
+            indoc! {r#"
+                let calls = 0;
+                try { [3, 2, 1, 0].sort(() => { calls++; throw new Error("stop") }) } catch (e) {}
+                calls
+            "#},
+            1,
+        ),
+    ]);
+}

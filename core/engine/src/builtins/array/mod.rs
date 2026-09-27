@@ -2667,18 +2667,11 @@ impl Array {
             // e. Set k to k + 1.
         }
         // 4. Sort items using an implementation-defined sequence of calls to SortCompare. If any such call returns an abrupt completion, stop before performing any further calls to SortCompare and return that Completion Record.
-        let mut sort_err = Ok(());
-        items.sort_by(|x, y| {
-            if sort_err.is_ok() {
-                sort_compare(x, y, context).unwrap_or_else(|err| {
-                    sort_err = Err(err);
-                    Ordering::Equal
-                })
-            } else {
-                Ordering::Equal
-            }
-        });
-        sort_err?;
+        // Not `slice::sort_by`: that panics when the comparator is not a
+        // total order, and JS comparators often are not (`() => Math.random()
+        // - 0.5` is a common shuffle). The spec leaves the result order
+        // implementation-defined then, but it must not fail.
+        merge_sort(&mut items, |x, y| sort_compare(x, y, context))?;
 
         // 5. Return items.
         Ok(items)
@@ -3699,4 +3692,54 @@ fn array_set_length(
 
     // 19. Return true.
     Ok(true)
+}
+
+/// A stable merge sort that tolerates inconsistent comparators and stops at
+/// the first error the comparator returns.
+fn merge_sort<T: Clone>(
+    items: &mut [T],
+    mut compare: impl FnMut(&T, &T) -> JsResult<Ordering>,
+) -> JsResult<()> {
+    const RUN: usize = 8;
+    let len = items.len();
+    // Insertion-sort short runs.
+    for start in (0..len).step_by(RUN) {
+        let end = (start + RUN).min(len);
+        for i in start + 1..end {
+            let mut j = i;
+            while j > start && compare(&items[j - 1], &items[j])? == Ordering::Greater {
+                items.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
+    // Merge runs bottom-up. Taking from the left unless it compares greater
+    // keeps equal elements in order.
+    let mut width = RUN;
+    let mut buffer: Vec<T> = Vec::with_capacity(len);
+    while width < len {
+        for start in (0..len).step_by(2 * width) {
+            let mid = (start + width).min(len);
+            let end = (start + 2 * width).min(len);
+            if mid == end {
+                continue;
+            }
+            buffer.clear();
+            let (mut i, mut j) = (start, mid);
+            while i < mid && j < end {
+                if compare(&items[i], &items[j])? == Ordering::Greater {
+                    buffer.push(items[j].clone());
+                    j += 1;
+                } else {
+                    buffer.push(items[i].clone());
+                    i += 1;
+                }
+            }
+            buffer.extend_from_slice(&items[i..mid]);
+            buffer.extend_from_slice(&items[j..end]);
+            items[start..end].clone_from_slice(&buffer);
+        }
+        width *= 2;
+    }
+    Ok(())
 }
