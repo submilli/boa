@@ -91,6 +91,8 @@ pub(crate) struct DateTimeFormat {
     time_style: Option<TimeStyle>,
     fractional_second_digits: Option<SubsecondDigits>,
     time_zone: FormatTimeZone,
+    /// The IANA name `resolvedOptions().timeZone` reports.
+    time_zone_name: String,
     fieldset: CompositeFieldSet,
     formatter: DateTimeFormatter<CompositeFieldSet>,
     bound_format: Option<JsFunction>,
@@ -393,7 +395,7 @@ impl DateTimeFormat {
                     let minutes = (seconds.abs() % 3600) / 60;
                     format!("{hours:+03}:{minutes:02}")
                 }
-                FormatTimeZone::Identifier((tz, _id)) => tz.to_string(),
+                FormatTimeZone::Identifier(_) => dtf.time_zone_name.clone(),
             };
             options.property(
                 js_string!("timeZone"),
@@ -678,7 +680,7 @@ pub(crate) fn create_date_time_format(
     let time_zone = if time_zone.is_undefined() {
         // TODO (nekevss): Resolve system time zone
         // a. Set timeZone to SystemTimeZoneIdentifier().
-        JsString::from("Etc/UTC")
+        JsString::from("UTC")
     // 17. Else,
     } else {
         // a. Set timeZone to ? ToString(timeZone).
@@ -686,6 +688,14 @@ pub(crate) fn create_date_time_format(
     };
     // 18. If IsTimeZoneOffsetString(timeZone) is true, then
     let time_zone_string = time_zone.to_std_string_escaped();
+    // Report IANA names (not the BCP 47 ids ICU uses internally), with the
+    // UTC aliases canonicalized as browsers do.
+    let time_zone_name = match time_zone_string.to_ascii_lowercase().as_str() {
+        "utc" | "etc/utc" | "etc/gmt" | "gmt" | "etc/uct" | "uct" | "etc/zulu" | "zulu" | "etc/universal" | "universal" => {
+            "UTC".to_string()
+        }
+        _ => time_zone_string.clone(),
+    };
     // Note: Should a timezone enum be part of temporal_rs, icu_time, or an ECMA402 wrapper lib
     let time_zone = if let Ok(utc_offset) = UtcOffset::try_from_str(&time_zone_string) {
         //  a. Let parseResult be ParseText(StringToCodePoints(timeZone), UTCOffset).
@@ -832,6 +842,7 @@ pub(crate) fn create_date_time_format(
         time_style,
         fractional_second_digits: format_options.fractional_second_digits(),
         time_zone,
+        time_zone_name,
         fieldset,
         formatter,
         bound_format: None,

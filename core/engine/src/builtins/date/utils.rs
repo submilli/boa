@@ -648,6 +648,11 @@ pub(super) fn time_zone_string(t: f64, hooks: &dyn HostHooks) -> JsString {
     // string-concatenation of the code unit 0x0020 (SPACE), the code unit 0x0028 (LEFT PARENTHESIS),
     // an implementation-defined timezone name, and the code unit 0x0029 (RIGHT PARENTHESIS).
     // 10. Return the string-concatenation of offsetSign, offsetHour, offsetMin, and tzName.
+    // Browsers name the zone; UTC (the only zone without a host time zone
+    // database) as V8 does.
+    if offset == 0.0 {
+        return js_string!(offset_sign, offset_hour, offset_min, js_str!(" (Coordinated Universal Time)"));
+    }
     js_string!(offset_sign, offset_hour, offset_min)
 }
 
