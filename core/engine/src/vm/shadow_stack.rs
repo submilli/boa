@@ -58,6 +58,29 @@ pub(crate) enum ShadowEntry {
 }
 
 impl ShadowEntry {
+    /// This entry as a V8 stack frame line, without the leading "    at ":
+    /// `name (url:line:col)`, or `url:line:col` for top-level code.
+    pub(crate) fn v8_frame(&self) -> String {
+        match self {
+            ShadowEntry::Native { function_name, .. } => {
+                let name = function_name.as_ref().map_or_else(|| "<anonymous>".to_string(), JsString::to_std_string_escaped);
+                format!("{name} (<anonymous>)")
+            }
+            ShadowEntry::Bytecode { pc, source_info } => {
+                let path = match source_info.map().path() {
+                    super::source_info::SourcePath::Path(path) => path.display().to_string(),
+                    _ => "<anonymous>".to_string(),
+                };
+                let location = match source_info.map().find(*pc) {
+                    Some(position) => format!("{path}:{}:{}", position.line_number(), position.column_number()),
+                    None => path,
+                };
+                let name = source_info.function_name().to_std_string_escaped();
+                if name.is_empty() { location } else { format!("{name} ({location})") }
+            }
+        }
+    }
+
     /// Create a display wrapper for this entry.
     ///
     /// # Arguments

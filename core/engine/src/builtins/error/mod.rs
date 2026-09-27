@@ -203,6 +203,15 @@ impl IntrinsicObject for Error {
                 accessor_attribute,
             );
 
+        // V8's stack-trace API, which libraries and feature probes use.
+        let builder = builder
+            .static_method(Self::capture_stack_trace, js_string!("captureStackTrace"), 2)
+            .static_property(
+                js_string!("stackTraceLimit"),
+                10,
+                Attribute::WRITABLE | Attribute::ENUMERABLE | Attribute::CONFIGURABLE,
+            );
+
         #[cfg(feature = "experimental")]
         let builder = builder.static_method(Error::is_error, js_string!("isError"), 1);
 
@@ -221,7 +230,7 @@ impl BuiltInObject for Error {
 impl BuiltInConstructor for Error {
     const CONSTRUCTOR_ARGUMENTS: usize = 1;
     const PROTOTYPE_STORAGE_SLOTS: usize = 5;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 1;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 3;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::error;
@@ -301,7 +310,7 @@ impl Error {
     ///
     /// [spec]: https://tc39.es/proposal-error-stacks/
     #[allow(clippy::unnecessary_wraps)]
-    fn get_stack(this: &JsValue, _: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
+    fn get_stack(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         // 1. Let E be the this value.
         // 2. If E is not an Object, return undefined.
         let Some(e) = this.as_object() else {
@@ -316,18 +325,70 @@ impl Error {
 
         // 5. Let stackString be an implementation-defined String value representing the call stack.
         // 6. Return stackString.
+        // In V8's format, which scripts parse: the error's own description,
+        // then one "    at" line per frame, innermost first, up to
+        // `Error.stackTraceLimit`.
         if let Some(backtrace) = error_data.stack.0.backtrace() {
-            let stack_string = backtrace
-                .iter()
-                .rev()
-                .fold(String::new(), |mut output, entry| {
-                    let _ = writeln!(&mut output, "    at {}", entry.display(true));
-                    output
-                });
-            return Ok(js_string!(stack_string).into());
+            let frames: Vec<String> = backtrace.iter().rev().map(ShadowEntry::v8_frame).collect();
+            drop(error_data);
+            let header = Self::stack_header(&e, context)?;
+            return Ok(js_string!(Self::v8_stack(header, &frames, context)).into());
         }
 
         // 7. If no stack trace is available, return undefined.
+        Ok(JsValue::undefined())
+    }
+
+    /// "Name: message" (or just the one that is not empty), as V8 starts a
+    /// stack trace.
+    fn stack_header(object: &JsObject, context: &mut Context) -> JsResult<String> {
+        let name = object.get(js_string!("name"), context)?;
+        let name = if name.is_undefined() { "Error".to_string() } else { name.to_string(context)?.to_std_string_escaped() };
+        let message = object.get(js_string!("message"), context)?;
+        let message = if message.is_undefined() { String::new() } else { message.to_string(context)?.to_std_string_escaped() };
+        Ok(match (name.is_empty(), message.is_empty()) {
+            (_, true) => name,
+            (true, false) => message,
+            (false, false) => format!("{name}: {message}"),
+        })
+    }
+
+    fn v8_stack(header: String, frames: &[String], context: &mut Context) -> String {
+        let limit = context
+            .intrinsics()
+            .constructors()
+            .error()
+            .constructor()
+            .get(js_string!("stackTraceLimit"), context)
+            .ok()
+            .and_then(|v| v.as_number())
+            .map_or(10, |n| if n.is_finite() { n.max(0.0) as usize } else { usize::MAX });
+        frames.iter().take(limit).fold(header, |mut output, frame| {
+            let _ = write!(&mut output, "\n    at {frame}");
+            output
+        })
+    }
+
+    /// `Error.captureStackTrace(object [, constructorOpt])` (V8): gives
+    /// `object` a `stack` property describing the current call stack.
+    fn capture_stack_trace(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let Some(object) = args.first().and_then(JsValue::as_object) else {
+            return Err(JsNativeError::typ().with_message("Invalid argument").into());
+        };
+        let limit = context.runtime_limits().backtrace_limit();
+        let backtrace = context.vm.shadow_stack.caller_position(limit);
+        let frames: Vec<String> = backtrace.iter().rev().map(ShadowEntry::v8_frame).collect();
+        let header = Self::stack_header(&object, context)?;
+        let stack = Self::v8_stack(header, &frames, context);
+        object.define_property_or_throw(
+            js_string!("stack"),
+            crate::property::PropertyDescriptor::builder()
+                .value(js_string!(stack))
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
         Ok(JsValue::undefined())
     }
 

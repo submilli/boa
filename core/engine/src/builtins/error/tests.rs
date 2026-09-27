@@ -68,3 +68,31 @@ fn error_lengths() {
         TestAction::assert_eq("AggregateError.length", 2),
     ]);
 }
+
+#[test]
+fn stack_is_in_v8_format() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            function thrower() { throw new TypeError("bad thing") }
+            let stack;
+            try { thrower() } catch (e) { stack = e.stack }
+            const lines = stack.split("\n");
+            lines[0] === "TypeError: bad thing" && lines[1].startsWith("    at thrower (")
+        "#}),
+        TestAction::assert(indoc! {r#"
+            Error.stackTraceLimit === 10 && typeof Error.captureStackTrace === "function"
+        "#}),
+        TestAction::assert(indoc! {r#"
+            const o = { name: "Custom", message: "hi" };
+            Error.captureStackTrace(o);
+            o.stack.startsWith("Custom: hi") && !Object.keys(o).includes("stack")
+        "#}),
+        TestAction::assert(indoc! {r#"
+            Error.stackTraceLimit = 0;
+            let s;
+            try { null.x } catch (e) { s = e.stack }
+            Error.stackTraceLimit = 10;
+            !s.includes("\n")
+        "#}),
+    ]);
+}
