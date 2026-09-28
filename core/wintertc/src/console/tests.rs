@@ -868,3 +868,85 @@ fn console_table_set_ignores_properties_filter() {
     assert!(logs.contains("(iteration index)"));
     assert!(logs.contains("Values"));
 }
+
+#[test]
+fn console_reentry_and_collection_limits_are_catchable() {
+    let mut cx = Context::default();
+    Console::register_with_logger(NullLogger, &mut cx).unwrap();
+    cx.eval(boa_engine::Source::from_bytes("console.count({toString(){console.count('nested');return 'outer'}});console.log('%d',{valueOf(){console.count('value');return 1}});console.group('%d',{valueOf(){console.group('nested');return 1}})")).unwrap();
+    assert!(
+        cx.eval(boa_engine::Source::from_bytes(
+            "for(let i=0;i<1100;i++)console.count('c'+i)"
+        ))
+        .is_err()
+    );
+    assert!(
+        cx.eval(boa_engine::Source::from_bytes(
+            "for(let i=0;i<1100;i++)console.time('t'+i)"
+        ))
+        .is_err()
+    );
+    assert!(
+        cx.eval(boa_engine::Source::from_bytes(
+            "for(let i=0;i<200;i++)console.group('g')"
+        ))
+        .is_err()
+    );
+}
+#[derive(boa_gc::Trace, boa_gc::Finalize)]
+struct ClockLogger;
+impl Logger for ClockLogger {
+    fn log(&self, _: String, state: &ConsoleState, _: &mut Context) -> JsResult<()> {
+        assert_eq!(state.timer_map().get(&js_string!("x")), Some(&42));
+        Ok(())
+    }
+    fn info(&self, msg: String, state: &ConsoleState, cx: &mut Context) -> JsResult<()> {
+        self.log(msg, state, cx)
+    }
+    fn warn(&self, msg: String, state: &ConsoleState, cx: &mut Context) -> JsResult<()> {
+        self.log(msg, state, cx)
+    }
+    fn error(&self, msg: String, state: &ConsoleState, cx: &mut Context) -> JsResult<()> {
+        self.log(msg, state, cx)
+    }
+}
+
+#[test]
+fn console_timers_use_the_context_clock() {
+    let clock = std::rc::Rc::new(boa_engine::context::time::FixedClock::from_millis(42));
+    let mut cx = Context::builder().clock(clock.clone()).build().unwrap();
+    Console::register_with_logger(ClockLogger, &mut cx).unwrap();
+    cx.eval(boa_engine::Source::from_bytes("console.time('x')"))
+        .unwrap();
+    clock.forward(7);
+    cx.eval(boa_engine::Source::from_bytes("console.timeLog('x')"))
+        .unwrap();
+}
+
+#[test]
+fn sparse_table_columns_and_large_cells_are_bounded() {
+    let mut cx = Context::default();
+    Console::register_with_logger(NullLogger, &mut cx).unwrap();
+    for code in [
+        "console.table(Array.from({length:10000},(_,i)=>({['c'+i]:i})))",
+        "console.table(Array.from({length:100},(_,i)=>({['c'+i]:i})))",
+        "console.table([{x:'y'.repeat(1000000)}])",
+        "console.table([{x:1}],Array(1000000).fill('x'))",
+    ] {
+        assert!(cx.eval(boa_engine::Source::from_bytes(code)).is_err());
+    }
+}
+
+#[test]
+fn recursive_errors_and_amplified_output_are_safe() {
+    let mut cx = Context::default();
+    Console::register_with_logger(NullLogger, &mut cx).unwrap();
+    cx.eval(boa_engine::Source::from_bytes("const e=new Error();e.message=e;console.log(e);const a=new Error(),b=new Error();a.name=b;b.name=a;console.log(a)")).unwrap();
+    for code in [
+        "console.table([{x:Array(1000).fill('x'.repeat(100000))}])",
+        "console.log(Array(1000).fill('x'.repeat(100000)))",
+        "console.log('%o',Array(1000).fill('x'.repeat(100000)))",
+    ] {
+        assert!(cx.eval(boa_engine::Source::from_bytes(code)).is_err());
+    }
+}

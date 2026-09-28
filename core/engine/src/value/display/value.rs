@@ -30,6 +30,9 @@ pub(crate) fn log_value_to(
     print_internals: bool,
     print_children: bool,
 ) -> fmt::Result {
+    let Some(_depth) = DisplayDepth::enter() else {
+        return f.write_str("[Object]");
+    };
     match x.variant() {
         // We don't want to print private (compiler) or prototype properties
         JsVariant::Object(v) => {
@@ -56,39 +59,28 @@ pub(crate) fn log_value_to(
             } else if v.downcast_ref::<NativeWeakSet>().is_some() {
                 f.write_str("WeakSet { <items unknown> }")
             } else if v.is::<Error>() {
-                let name: std::borrow::Cow<'static, str> = v
+                let name = v
                     .get_property(&js_string!("name").into())
                     .as_ref()
                     .and_then(PropertyDescriptor::value)
-                    .map_or_else(
-                        || "<error>".into(),
-                        |v| {
-                            v.as_string()
-                                .as_ref()
-                                .map_or_else(
-                                    || v.display().to_string(),
-                                    JsString::to_std_string_escaped,
-                                )
-                                .into()
-                        },
-                    );
+                    .cloned()
+                    .unwrap_or_else(|| js_string!("<error>").into());
                 let message = v
                     .get_property(&js_string!("message").into())
                     .as_ref()
                     .and_then(PropertyDescriptor::value)
-                    .map(|v| {
-                        v.as_string().as_ref().map_or_else(
-                            || v.display().to_string(),
-                            JsString::to_std_string_escaped,
-                        )
-                    })
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    f.write_str(&message)?;
-                } else if message.is_empty() {
-                    f.write_str(name.as_ref())?;
-                } else {
-                    write!(f, "{name}: {message}")?;
+                    .cloned()
+                    .unwrap_or_else(|| js_string!("").into());
+                let name_empty = name.as_string().is_some_and(|s| s.is_empty());
+                let message_empty = message.as_string().is_some_and(|s| s.is_empty());
+                if !name_empty {
+                    error_field(f, &name)?;
+                }
+                if !name_empty && !message_empty {
+                    f.write_str(": ")?;
+                }
+                if !message_empty {
+                    error_field(f, &message)?;
                 }
                 let data = v
                     .downcast_ref::<Error>()
@@ -140,7 +132,7 @@ pub(crate) fn log_value_to(
                     }
                 }
             } else {
-                Display::fmt(&x.display_obj(print_internals), f)
+                Display::fmt(&x.display_obj_view(print_internals), f)
             }
         }
         JsVariant::Null => write!(f, "null"),
@@ -256,5 +248,52 @@ pub(super) fn log_value_compact(
         }
         // All non-object variants are formatted the same in compact and non-compact modes.
         _ => log_value_to(f, x, print_internals, false),
+    }
+}
+
+// Error fields and fulfilled Promises can refer back to themselves without
+// entering the ordinary object's display recursion guard.
+thread_local! { static DISPLAY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+struct DisplayDepth;
+impl DisplayDepth {
+    fn enter() -> Option<Self> {
+        DISPLAY_DEPTH.with(|depth| {
+            if depth.get() >= 32 {
+                return None;
+            }
+            depth.set(depth.get() + 1);
+            Some(Self)
+        })
+    }
+}
+impl Drop for DisplayDepth {
+    fn drop(&mut self) {
+        DISPLAY_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+fn error_field(f: &mut fmt::Formatter<'_>, value: &JsValue) -> fmt::Result {
+    if let Some(s) = value.as_string() {
+        f.write_str(&s.to_std_string_escaped())
+    } else {
+        Display::fmt(&value.display(), f)
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use crate::{Context, Source};
+    #[test]
+    fn recursive_error_fields_and_deep_inspection_are_bounded() {
+        let mut cx = Context::default();
+        for code in [
+            "let e=new Error();e.message=e;e",
+            "let a=new Error(),b=new Error();a.name=b;b.name=a;a",
+            "let root={};for(let i=0;i<20000;i++)root={child:root};root",
+        ] {
+            let value = cx.eval(Source::from_bytes(code)).unwrap();
+            let text = value.display().to_string();
+            assert!(text.contains("[Object]"));
+            assert!(text.len() < 100000);
+        }
     }
 }

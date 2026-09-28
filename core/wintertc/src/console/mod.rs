@@ -15,13 +15,13 @@
 //!
 //! `console` is required in the `WinterTC` TC55 Minimum Common Web API.
 
+mod bounded;
 mod table;
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub use table::TableData;
 
-use boa_engine::JsVariant;
 use boa_engine::property::Attribute;
 use boa_engine::{
     Context, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol, js_str,
@@ -33,10 +33,7 @@ use boa_engine::{
 use boa_gc::{Finalize, Trace};
 use comfy_table::{Cell, Table};
 use rustc_hash::FxHashMap;
-use std::{
-    cell::RefCell, collections::hash_map::Entry, fmt::Write as _, io::Write, rc::Rc,
-    time::SystemTime,
-};
+use std::{cell::RefCell, collections::hash_map::Entry, fmt::Write as _, io::Write, rc::Rc};
 
 /// Registers the `console` object into the given context, using the [`DefaultLogger`].
 ///
@@ -192,25 +189,24 @@ impl Logger for NullLogger {
 
 /// This represents the `console` formatter.
 fn formatter(data: &[JsValue], context: &mut Context) -> JsResult<String> {
-    fn to_string(value: &JsValue, _context: &mut Context) -> String {
-        match value.variant() {
-            JsVariant::String(s) => s.to_std_string_escaped(),
-            _ => value.display().to_string(),
+    fn to_string(value: &JsValue, _context: &mut Context) -> JsResult<String> {
+        if let Some(s) = value.as_string() {
+            bounded::string(&s)
+        } else {
+            bounded::display(&value.display(), 65536)
         }
     }
 
     match data {
         [] => Ok(String::new()),
-        [val] => Ok(to_string(val, context)),
+        [val] => to_string(val, context),
         data => {
             let mut formatted = String::new();
             let mut arg_index = 1;
-            let target = data
-                .get_or_undefined(0)
-                .to_string(context)?
-                .to_std_string_escaped();
+            let target = bounded::string(&data.get_or_undefined(0).to_string(context)?)?;
             let mut chars = target.chars();
             while let Some(c) = chars.next() {
+                bounded::check(formatted.len(), 65536)?;
                 if c == '%' {
                     let fmt = chars.next().unwrap_or('%');
                     match fmt {
@@ -218,7 +214,7 @@ fn formatter(data: &[JsValue], context: &mut Context) -> JsResult<String> {
                         'd' | 'i' => {
                             let arg = match data.get_or_undefined(arg_index).to_numeric(context)? {
                                 Numeric::Number(r) => (r.floor() + 0.0).to_string(),
-                                Numeric::BigInt(int) => int.to_string(),
+                                Numeric::BigInt(int) => bounded::display(&int, 65536)?,
                             };
                             formatted.push_str(&arg);
                             arg_index += 1;
@@ -232,7 +228,10 @@ fn formatter(data: &[JsValue], context: &mut Context) -> JsResult<String> {
                         /* object: use internals mode for richer inspection */
                         'o' | 'O' => {
                             let arg = data.get_or_undefined(arg_index);
-                            formatted.push_str(&arg.display().internals(true).to_string());
+                            formatted.push_str(&bounded::display(
+                                &arg.display().internals(true),
+                                65536,
+                            )?);
                             arg_index += 1;
                         }
                         /* string */
@@ -247,12 +246,12 @@ fn formatter(data: &[JsValue], context: &mut Context) -> JsResult<String> {
                             {
                                 let arg =
                                     to_string_fn.call(arg, &[], context)?.to_string(context)?;
-                                formatted.push_str(&arg.to_std_string_escaped());
+                                formatted.push_str(&bounded::string(&arg)?);
                                 written = true;
                             }
 
                             if !written {
-                                let arg = arg.to_string(context)?.to_std_string_escaped();
+                                let arg = bounded::string(&arg.to_string(context)?)?;
                                 formatted.push_str(&arg);
                             }
 
@@ -272,18 +271,19 @@ fn formatter(data: &[JsValue], context: &mut Context) -> JsResult<String> {
             /* unformatted data */
             for rest in data.iter().skip(arg_index) {
                 formatted.push(' ');
-                formatted.push_str(&to_string(rest, context));
+                formatted.push_str(&to_string(rest, context)?);
+                bounded::check(formatted.len(), 65536)?;
             }
 
+            bounded::check(formatted.len(), 65536)?;
             Ok(formatted)
         }
     }
 }
 
 /// The current state of the console, passed to the logger backend.
-/// This should not be copied or cloned. References are only valid
-/// for the current logging call.
-#[derive(Debug, Default, Trace, Finalize)]
+/// Loggers receive a snapshot so reentrant calls do not retain a state borrow.
+#[derive(Debug, Default, Clone, Trace, Finalize)]
 pub struct ConsoleState {
     /// The map of console counters, used in `console.count()`.
     count_map: FxHashMap<JsString, u32>,
@@ -357,31 +357,20 @@ impl Console {
     where
         L: Logger + 'static,
     {
+        type Method<L> =
+            fn(&JsValue, &[JsValue], &RefCell<Console>, &L, &mut Context) -> JsResult<JsValue>;
         fn console_method<L: Logger + 'static>(
-            f: fn(&JsValue, &[JsValue], &Console, &L, &mut Context) -> JsResult<JsValue>,
+            f: Method<L>,
             state: Rc<RefCell<Console>>,
             logger: Rc<L>,
         ) -> NativeFunction {
             // SAFETY: `Console` doesn't contain types that need tracing.
             unsafe {
                 NativeFunction::from_closure(move |this, args, context| {
-                    f(this, args, &state.borrow(), &logger, context)
+                    f(this, args, &state, &logger, context)
                 })
             }
         }
-        fn console_method_mut<L: Logger + 'static>(
-            f: fn(&JsValue, &[JsValue], &mut Console, &L, &mut Context) -> JsResult<JsValue>,
-            state: Rc<RefCell<Console>>,
-            logger: Rc<L>,
-        ) -> NativeFunction {
-            // SAFETY: `Console` doesn't contain types that need tracing.
-            unsafe {
-                NativeFunction::from_closure(move |this, args, context| {
-                    f(this, args, &mut state.borrow_mut(), &logger, context)
-                })
-            }
-        }
-
         let state = Rc::new(RefCell::new(Self::default()));
         let logger = Rc::new(logger);
 
@@ -401,7 +390,7 @@ impl Console {
             0,
         )
         .function(
-            console_method_mut(Self::clear, state.clone(), logger.clone()),
+            console_method(Self::clear, state.clone(), logger.clone()),
             js_string!("clear"),
             0,
         )
@@ -441,32 +430,32 @@ impl Console {
             0,
         )
         .function(
-            console_method_mut(Self::count, state.clone(), logger.clone()),
+            console_method(Self::count, state.clone(), logger.clone()),
             js_string!("count"),
             0,
         )
         .function(
-            console_method_mut(Self::count_reset, state.clone(), logger.clone()),
+            console_method(Self::count_reset, state.clone(), logger.clone()),
             js_string!("countReset"),
             0,
         )
         .function(
-            console_method_mut(Self::group, state.clone(), logger.clone()),
+            console_method(Self::group, state.clone(), logger.clone()),
             js_string!("group"),
             0,
         )
         .function(
-            console_method_mut(Self::group_collapsed, state.clone(), logger.clone()),
+            console_method(Self::group_collapsed, state.clone(), logger.clone()),
             js_string!("groupCollapsed"),
             0,
         )
         .function(
-            console_method_mut(Self::group_end, state.clone(), logger.clone()),
+            console_method(Self::group_end, state.clone(), logger.clone()),
             js_string!("groupEnd"),
             0,
         )
         .function(
-            console_method_mut(Self::time, state.clone(), logger.clone()),
+            console_method(Self::time, state.clone(), logger.clone()),
             js_string!("time"),
             0,
         )
@@ -476,7 +465,7 @@ impl Console {
             0,
         )
         .function(
-            console_method_mut(Self::time_end, state.clone(), logger.clone()),
+            console_method(Self::time_end, state.clone(), logger.clone()),
             js_string!("timeEnd"),
             0,
         )
@@ -517,7 +506,7 @@ impl Console {
     fn assert(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -531,12 +520,14 @@ impl Console {
             } else if !args[0].is_string() {
                 args.insert(0, JsValue::new(message));
             } else {
-                let value = JsString::from(args[0].display().to_string());
+                let value = JsString::from(bounded::display(&args[0].display(), 65536)?);
                 let concat = js_string!(message.as_str(), js_str!(": "), &value);
                 args[0] = JsValue::new(concat);
             }
 
-            logger.error(formatter(&args, context)?, &console.state, context)?;
+            let snapshot = console.borrow().state.clone();
+
+            logger.error(formatter(&args, context)?, &snapshot, context)?;
         }
 
         Ok(JsValue::undefined())
@@ -556,11 +547,11 @@ impl Console {
     fn clear(
         _: &JsValue,
         _: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         _: &impl Logger,
         _: &mut Context,
     ) -> JsResult<JsValue> {
-        console.state.groups.clear();
+        console.borrow_mut().state.groups.clear();
         Ok(JsValue::undefined())
     }
 
@@ -577,11 +568,12 @@ impl Console {
     fn debug(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        logger.debug(formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        logger.debug(formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -598,11 +590,12 @@ impl Console {
     fn error(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        logger.error(formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        logger.error(formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -619,11 +612,12 @@ impl Console {
     fn info(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        logger.info(formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        logger.info(formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -640,11 +634,12 @@ impl Console {
     fn log(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        logger.log(formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        logger.log(formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -661,11 +656,12 @@ impl Console {
     fn trace(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        Logger::trace(logger, formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        Logger::trace(logger, formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -682,11 +678,12 @@ impl Console {
     fn warn(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        logger.warn(formatter(args, context)?, &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+        logger.warn(formatter(args, context)?, &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -703,7 +700,7 @@ impl Console {
     fn count(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -713,10 +710,24 @@ impl Console {
         };
 
         let msg = format!("count {}:", label.to_std_string_escaped());
-        let c = console.state.count_map.entry(label).or_insert(0);
-        *c += 1;
+        let c = {
+            let mut console = console.borrow_mut();
+            if label.len() > 4096
+                || (!console.state.count_map.contains_key(&label)
+                    && console.state.count_map.len() >= 1024)
+            {
+                return Err(JsNativeError::range()
+                    .with_message("Console counter limit exceeded")
+                    .into());
+            }
+            let c = console.state.count_map.entry(label).or_insert(0);
+            *c = c.saturating_add(1);
+            *c
+        };
 
-        logger.info(format!("{msg} {c}"), &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+
+        logger.info(format!("{msg} {c}"), &snapshot, context)?;
         Ok(JsValue::undefined())
     }
 
@@ -733,7 +744,7 @@ impl Console {
     fn count_reset(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -742,23 +753,17 @@ impl Console {
             None => "default".into(),
         };
 
-        console.state.count_map.remove(&label);
+        console.borrow_mut().state.count_map.remove(&label);
+
+        let snapshot = console.borrow().state.clone();
 
         logger.warn(
             format!("countReset {}", label.to_std_string_escaped()),
-            &console.state,
+            &snapshot,
             context,
         )?;
 
         Ok(JsValue::undefined())
-    }
-
-    /// Returns current system time in ms.
-    fn system_time_in_ms() -> u128 {
-        let now = SystemTime::now();
-        now.duration_since(SystemTime::UNIX_EPOCH)
-            .expect("negative duration")
-            .as_millis()
     }
 
     /// `console.time(label)`
@@ -774,7 +779,7 @@ impl Console {
     fn time(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -783,13 +788,28 @@ impl Console {
             None => "default".into(),
         };
 
-        if let Entry::Vacant(e) = console.state.timer_map.entry(label.clone()) {
-            let time = Self::system_time_in_ms();
-            e.insert(time);
-        } else {
+        let inserted = {
+            let mut console = console.borrow_mut();
+            if label.len() > 4096
+                || (!console.state.timer_map.contains_key(&label)
+                    && console.state.timer_map.len() >= 1024)
+            {
+                return Err(JsNativeError::range()
+                    .with_message("Console timer limit exceeded")
+                    .into());
+            }
+            if let Entry::Vacant(e) = console.state.timer_map.entry(label.clone()) {
+                e.insert(u128::from(context.clock().now().millis_since_epoch()));
+                true
+            } else {
+                false
+            }
+        };
+        if !inserted {
+            let snapshot = console.borrow().state.clone();
             logger.warn(
                 format!("Timer '{}' already exist", label.to_std_string_escaped()),
-                &console.state,
+                &snapshot,
                 context,
             )?;
         }
@@ -810,7 +830,7 @@ impl Console {
     fn time_log(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -819,17 +839,26 @@ impl Console {
             None => "default".into(),
         };
 
-        if let Some(t) = console.state.timer_map.get(&label) {
-            let time = Self::system_time_in_ms();
-            let mut concat = format!("{}: {} ms", label.to_std_string_escaped(), time - t);
+        let timer = console.borrow().state.timer_map.get(&label).copied();
+        if let Some(t) = timer {
+            let time = u128::from(context.clock().now().millis_since_epoch());
+            let mut concat = format!(
+                "{}: {} ms",
+                label.to_std_string_escaped(),
+                time.saturating_sub(t)
+            );
             for msg in args.iter().skip(1) {
-                concat = concat + " " + &msg.display().to_string();
+                concat.push(' ');
+                concat.push_str(&bounded::display(&msg.display(), 65536)?);
+                bounded::check(concat.len(), 65536)?;
             }
-            logger.log(concat, &console.state, context)?;
+            let snapshot = console.borrow().state.clone();
+            logger.log(concat, &snapshot, context)?;
         } else {
+            let snapshot = console.borrow().state.clone();
             logger.warn(
                 format!("Timer '{}' doesn't exist", label.to_std_string_escaped()),
-                &console.state,
+                &snapshot,
                 context,
             )?;
         }
@@ -850,7 +879,7 @@ impl Console {
     fn time_end(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -859,21 +888,24 @@ impl Console {
             None => "default".into(),
         };
 
-        if let Some(t) = console.state.timer_map.remove(&label) {
-            let time = Self::system_time_in_ms();
+        let timer = console.borrow_mut().state.timer_map.remove(&label);
+        if let Some(t) = timer {
+            let time = u128::from(context.clock().now().millis_since_epoch());
+            let snapshot = console.borrow().state.clone();
             logger.info(
                 format!(
                     "{}: {} ms - timer removed",
                     label.to_std_string_escaped(),
-                    time - t
+                    time.saturating_sub(t)
                 ),
-                &console.state,
+                &snapshot,
                 context,
             )?;
         } else {
+            let snapshot = console.borrow().state.clone();
             logger.warn(
                 format!("Timer '{}' doesn't exist", label.to_std_string_escaped()),
-                &console.state,
+                &snapshot,
                 context,
             )?;
         }
@@ -894,13 +926,21 @@ impl Console {
     fn group(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
         let group_label = formatter(args, context)?;
 
-        logger.info(format!("group: {group_label}"), &console.state, context)?;
+        let snapshot = console.borrow().state.clone();
+
+        logger.info(format!("group: {group_label}"), &snapshot, context)?;
+        let mut console = console.borrow_mut();
+        if group_label.len() > 4096 || console.state.groups.len() >= 128 {
+            return Err(JsNativeError::range()
+                .with_message("Console group limit exceeded")
+                .into());
+        }
         console.state.groups.push(group_label);
 
         Ok(JsValue::undefined())
@@ -919,7 +959,7 @@ impl Console {
     fn group_collapsed(
         _: &JsValue,
         args: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -940,11 +980,11 @@ impl Console {
     fn group_end(
         _: &JsValue,
         _: &[JsValue],
-        console: &mut Self,
+        console: &RefCell<Self>,
         _: &impl Logger,
         _: &mut Context,
     ) -> JsResult<JsValue> {
-        console.state.groups.pop();
+        console.borrow_mut().state.groups.pop();
 
         Ok(JsValue::undefined())
     }
@@ -963,13 +1003,14 @@ impl Console {
     fn dir(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let snapshot = console.borrow().state.clone();
         logger.info(
-            args.get_or_undefined(0).display_obj(true),
-            &console.state,
+            bounded::display(&args.get_or_undefined(0).display_obj_view(true), 65536)?,
+            &snapshot,
             context,
         )?;
         Ok(JsValue::undefined())
@@ -990,7 +1031,7 @@ impl Console {
     fn table(
         _: &JsValue,
         args: &[JsValue],
-        console: &Self,
+        console: &RefCell<Self>,
         logger: &impl Logger,
         context: &mut Context,
     ) -> JsResult<JsValue> {
@@ -1022,8 +1063,9 @@ impl Console {
 
         let data = table::build_table_data(&obj, properties.as_ref(), context)?;
 
+        let snapshot = console.borrow().state.clone();
         match data {
-            Some(td) => logger.table(td, &console.state, context)?,
+            Some(td) => logger.table(td, &snapshot, context)?,
             None => return Self::log(&JsValue::undefined(), args, console, logger, context),
         }
 

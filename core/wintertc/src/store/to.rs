@@ -1,5 +1,5 @@
-//! All methods for deserializing a [`JsValueStore`] into a [`JsValue`].
-use crate::store::{JsValueStore, StringStore, ValueStoreInner, unsupported_type};
+//! All methods for deserializing a [`NodeId`] into a [`JsValue`].
+use crate::store::{NodeId, StringStore, ValueStoreInner, unsupported_type};
 use boa_engine::builtins::array_buffer::{AlignedVec, SharedArrayBuffer};
 use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::object::builtins::{
@@ -9,24 +9,29 @@ use boa_engine::object::builtins::{
 use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_error};
 use rustc_hash::FxHashMap;
 
-#[derive(Default)]
-pub(super) struct ReverseSeenMap(FxHashMap<usize, JsObject>);
+pub(super) struct ReverseSeenMap {
+    objects: FxHashMap<NodeId, JsObject>,
+    graph: std::sync::Arc<Vec<ValueStoreInner>>,
+}
 
 impl ReverseSeenMap {
-    fn get(&self, object: &JsValueStore) -> Option<JsObject> {
-        let addr = std::ptr::from_ref(object.0.as_ref()).addr();
-        self.0.get(&addr).cloned()
+    pub(super) fn new(graph: std::sync::Arc<Vec<ValueStoreInner>>) -> Self {
+        Self {
+            graph,
+            objects: FxHashMap::default(),
+        }
     }
-
-    fn insert(&mut self, original: &JsValueStore, object: JsObject) {
-        let addr = std::ptr::from_ref(original.0.as_ref()).addr();
-        self.0.insert(addr, object);
+    fn get(&self, object: NodeId) -> Option<JsObject> {
+        self.objects.get(&object).cloned()
+    }
+    fn insert(&mut self, original: NodeId, object: JsObject) {
+        self.objects.insert(original, object);
     }
 }
 
 fn try_fields_into_js_object(
-    store: &JsValueStore,
-    fields: &Vec<(StringStore, JsValueStore)>,
+    store: NodeId,
+    fields: &Vec<(StringStore, NodeId)>,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -35,15 +40,15 @@ fn try_fields_into_js_object(
 
     for (k, v) in fields {
         let k = k.to_js_string();
-        let value = try_value_into_js(v, seen, context)?;
+        let value = try_value_into_js(*v, seen, context)?;
         dolly.set(k, value, true, context)?;
     }
     Ok(JsValue::from(dolly))
 }
 
 fn try_items_into_js_array(
-    store: &JsValueStore,
-    items: &[Option<JsValueStore>],
+    store: NodeId,
+    items: &[Option<NodeId>],
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -55,14 +60,14 @@ fn try_items_into_js_array(
         .enumerate()
         .filter_map(|(k, v)| v.as_ref().map(|v| (k, v)))
     {
-        let value = try_value_into_js(v, seen, context)?;
+        let value = try_value_into_js(*v, seen, context)?;
         dolly.set(k, value, true, context)?;
     }
     Ok(JsValue::from(dolly))
 }
 
 fn try_into_js_array_buffer(
-    store: &JsValueStore,
+    store: NodeId,
     data: &[u8],
     seen: &mut ReverseSeenMap,
     context: &mut Context,
@@ -74,7 +79,7 @@ fn try_into_js_array_buffer(
 }
 
 fn try_into_js_shared_array_buffer(
-    store: &JsValueStore,
+    store: NodeId,
     inner: &SharedArrayBuffer,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
@@ -86,9 +91,9 @@ fn try_into_js_shared_array_buffer(
 }
 
 fn try_into_js_typed_array(
-    store: &JsValueStore,
+    store: NodeId,
     kind: TypedArrayKind,
-    buffer: &JsValueStore,
+    buffer: NodeId,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -105,16 +110,16 @@ fn try_into_js_typed_array(
 }
 
 fn try_into_js_map(
-    store: &JsValueStore,
-    key_values: &[(JsValueStore, JsValueStore)],
+    store: NodeId,
+    key_values: &[(NodeId, NodeId)],
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let map = JsMap::new(context);
     seen.insert(store, map.clone().into());
     for (k, v) in key_values {
-        let k = try_value_into_js(k, seen, context)?;
-        let v = try_value_into_js(v, seen, context)?;
+        let k = try_value_into_js(*k, seen, context)?;
+        let v = try_value_into_js(*v, seen, context)?;
         map.set(k, v, context)?;
     }
 
@@ -122,15 +127,15 @@ fn try_into_js_map(
 }
 
 fn try_into_js_set(
-    store: &JsValueStore,
-    values: &[JsValueStore],
+    store: NodeId,
+    values: &[NodeId],
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let set = JsSet::new(context);
     seen.insert(store, set.clone().into());
     for v in values {
-        let v = try_value_into_js(v, seen, context)?;
+        let v = try_value_into_js(*v, seen, context)?;
         set.add(v, context)?;
     }
 
@@ -138,7 +143,7 @@ fn try_into_js_set(
 }
 
 fn try_into_js_date(
-    store: &JsValueStore,
+    store: NodeId,
     ms_since_epoch: f64,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
@@ -151,7 +156,7 @@ fn try_into_js_date(
 }
 
 fn try_into_regexp(
-    store: &JsValueStore,
+    store: NodeId,
     source: &str,
     flags: &str,
     seen: &mut ReverseSeenMap,
@@ -163,8 +168,8 @@ fn try_into_regexp(
 }
 
 fn try_into_data_view(
-    store: &JsValueStore,
-    buffer: &JsValueStore,
+    store: NodeId,
+    buffer: NodeId,
     byte_length: u64,
     byte_offset: u64,
     seen: &mut ReverseSeenMap,
@@ -183,7 +188,7 @@ fn try_into_data_view(
 }
 
 pub(super) fn try_value_into_js(
-    store: &JsValueStore,
+    store: NodeId,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -191,8 +196,9 @@ pub(super) fn try_value_into_js(
         return Ok(JsValue::from(v));
     }
 
-    // Match the value
-    match &*store.0 {
+    let _depth = super::Traversal::enter()?;
+    let graph = seen.graph.clone();
+    match &graph[store] {
         ValueStoreInner::Empty => {
             unreachable!("ValueStoreInner::Empty should not exist after storage.");
         }
@@ -219,9 +225,9 @@ pub(super) fn try_value_into_js(
             buffer,
             byte_length,
             byte_offset,
-        } => try_into_data_view(store, buffer, *byte_length, *byte_offset, seen, context),
+        } => try_into_data_view(store, *buffer, *byte_length, *byte_offset, seen, context),
         ValueStoreInner::TypedArray { kind, buffer } => {
-            try_into_js_typed_array(store, *kind, buffer, seen, context)
+            try_into_js_typed_array(store, *kind, *buffer, seen, context)
         }
     }
 }

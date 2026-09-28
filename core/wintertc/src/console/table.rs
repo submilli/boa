@@ -70,10 +70,11 @@ fn extract_map_rows(map: &JsMap) -> JsResult<TableData> {
     let mut index = 0usize;
 
     map.for_each_native(|key, value| {
+        check_limit(rows.len() + 1, 128)?;
         let mut row = FxHashMap::default();
         row.insert(ITER_INDEX_COL.to_string(), index.to_string());
-        row.insert(KEY_COL.to_string(), display_cell_value(&key));
-        row.insert(VALUE_COL.to_string(), display_cell_value(&value));
+        row.insert(KEY_COL.to_string(), display_cell_value(&key)?);
+        row.insert(VALUE_COL.to_string(), display_cell_value(&value)?);
         rows.push(row);
         index += 1;
         Ok(())
@@ -89,9 +90,10 @@ fn extract_set_rows(set: &JsSet) -> JsResult<TableData> {
     let mut index = 0usize;
 
     set.for_each_native(|value| {
+        check_limit(rows.len() + 1, 128)?;
         let mut row = FxHashMap::default();
         row.insert(ITER_INDEX_COL.to_string(), index.to_string());
-        row.insert(VALUE_COL.to_string(), display_cell_value(&value));
+        row.insert(VALUE_COL.to_string(), display_cell_value(&value)?);
         rows.push(row);
         index += 1;
         Ok(())
@@ -106,6 +108,7 @@ fn extract_set_rows(set: &JsSet) -> JsResult<TableData> {
 /// browser behaviour (equivalent to `Object.keys()`, e.g. excludes `length` on arrays).
 fn extract_rows(obj: &JsObject, context: &mut Context) -> JsResult<TableData> {
     let keys = enumerable_keys(obj, context)?;
+    check_limit(keys.len(), 128)?;
     let mut col_names = vec![INDEX_COL.to_string()];
     let mut seen_cols: FxHashSet<String> = FxHashSet::default();
     seen_cols.insert(INDEX_COL.to_string());
@@ -120,16 +123,17 @@ fn extract_rows(obj: &JsObject, context: &mut Context) -> JsResult<TableData> {
             let inner_keys = enumerable_keys(&val_obj, context)?;
             for col in &inner_keys {
                 if seen_cols.insert(col.clone()) {
+                    check_limit(col_names.len() + 1, 64)?;
                     col_names.push(col.clone());
                 }
                 let cell = val_obj.get(js_string!(col.as_str()), context)?;
-                row.insert(col.clone(), display_cell_value(&cell));
+                row.insert(col.clone(), display_cell_value(&cell)?);
             }
         } else {
             if seen_cols.insert(VALUE_COL.to_string()) {
                 col_names.push(VALUE_COL.to_string());
             }
-            row.insert(VALUE_COL.to_string(), display_cell_value(&val));
+            row.insert(VALUE_COL.to_string(), display_cell_value(&val)?);
         }
 
         rows.push(row);
@@ -143,14 +147,18 @@ fn extract_rows(obj: &JsObject, context: &mut Context) -> JsResult<TableData> {
 /// Objects and arrays are rendered on a single line (e.g. `{ nested: true }`
 /// instead of multi-line pretty-print), matching Node.js/Chrome behaviour
 /// for nested values in `console.table`.
-fn display_cell_value(val: &JsValue) -> String {
-    let raw = val.display().to_string();
+fn display_cell_value(val: &JsValue) -> JsResult<String> {
+    if let Some(s) = val.as_string() {
+        check_limit(s.len(), 256)?;
+    }
+    let raw = super::bounded::display(&val.display(), 1024)?;
     // If the display spans multiple lines, collapse to single-line.
-    if raw.contains('\n') {
+    check_limit(raw.len(), 1024)?;
+    Ok(if raw.contains('\n') {
         raw.split('\n').map(str::trim).collect::<Vec<_>>().join(" ")
     } else {
         raw
-    }
+    })
 }
 
 /// Returns the enumerable own string-keyed property names of `obj`,
@@ -169,10 +177,13 @@ fn enumerable_keys(obj: &JsObject, context: &mut Context) -> JsResult<Vec<String
     let length = keys_obj
         .get(js_string!("length"), context)?
         .to_length(context)?;
+    check_limit(usize::try_from(length).unwrap_or(usize::MAX), 128)?;
     let mut result = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
     for i in 0..length {
         let val = keys_obj.get(i, context)?;
-        result.push(val.to_string(context)?.to_std_string_escaped());
+        let key = val.to_string(context)?;
+        check_limit(key.len(), 256)?;
+        result.push(key.to_std_string_escaped());
     }
     Ok(result)
 }
@@ -192,6 +203,7 @@ fn filter_columns(
         .get(js_string!("length"), context)?
         .to_length(context)?;
 
+    check_limit(usize::try_from(length).unwrap_or(usize::MAX), 63)?;
     let mut result = Vec::new();
     let mut seen = FxHashSet::default();
 
@@ -204,11 +216,22 @@ fn filter_columns(
     // Add columns in the order specified by the properties array.
     for i in 0..length {
         let val = properties.get(i, context)?;
-        let col = val.to_string(context)?.to_std_string_escaped();
+        let col = val.to_string(context)?;
+        check_limit(col.len(), 256)?;
+        let col = col.to_std_string_escaped();
         if seen.insert(col.clone()) {
             result.push(col);
         }
     }
 
     Ok(result)
+}
+
+fn check_limit(value: usize, max: usize) -> JsResult<()> {
+    if value > max {
+        return Err(boa_engine::JsNativeError::range()
+            .with_message("Console table limit exceeded")
+            .into());
+    }
+    Ok(())
 }

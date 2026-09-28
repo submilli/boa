@@ -79,17 +79,17 @@ enum ValueStoreInner {
     /// A dictionary of strings to values which should be reconstructed into
     /// a `JsObject`. Note: the prototype and constructor are not maintained,
     /// and during reconstruction the default `Object` prototype will be used.
-    Object(Vec<(StringStore, JsValueStore)>),
+    Object(Vec<(StringStore, NodeId)>),
 
     /// A `Map()` object in JavaScript.
-    Map(Vec<(JsValueStore, JsValueStore)>),
+    Map(Vec<(NodeId, NodeId)>),
 
     /// A `Set()` object in JavaScript. The elements are already unique at
     /// construction.
-    Set(Vec<JsValueStore>),
+    Set(Vec<NodeId>),
 
     /// An `Array` object in JavaScript.
-    Array(Vec<Option<JsValueStore>>),
+    Array(Vec<Option<NodeId>>),
 
     /// A `Date` object in JavaScript. Although this can be marshaled, it uses
     /// the system's datetime library to be reconstructed and may diverge.
@@ -119,7 +119,7 @@ enum ValueStoreInner {
     /// Dataview.
     #[expect(unused)]
     DataView {
-        buffer: JsValueStore,
+        buffer: NodeId,
         byte_length: u64,
         byte_offset: u64,
     },
@@ -127,7 +127,7 @@ enum ValueStoreInner {
     /// Typed Array, including its kind and data.
     TypedArray {
         kind: TypedArrayKind,
-        buffer: JsValueStore,
+        buffer: NodeId,
     },
 }
 
@@ -147,50 +147,21 @@ enum ValueStoreInner {
 ///
 /// [sca]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm
 #[derive(Debug, Clone)]
-pub struct JsValueStore(Arc<ValueStoreInner>);
+pub struct JsValueStore {
+    graph: Arc<Vec<ValueStoreInner>>,
+    root: NodeId,
+}
+
+type NodeId = usize;
 
 impl TryIntoJs for JsValueStore {
     fn try_into_js(&self, context: &mut Context) -> JsResult<JsValue> {
-        let mut seen = to::ReverseSeenMap::default();
-        to::try_value_into_js(self, &mut seen, context)
+        let mut seen = to::ReverseSeenMap::new(self.graph.clone());
+        to::try_value_into_js(self.root, &mut seen, context)
     }
 }
 
 impl JsValueStore {
-    /// Replace the inner content with a new inner. This is necessary as the inner
-    /// content holder must be allocated before its own inner content is created
-    /// (to allow for recursive data). Therefore, the pattern is to create the
-    /// store with an empty inner, then create the sub-content, and replace the
-    /// empty inner with the new inner.
-    ///
-    /// # SAFETY
-    /// This should only be done if the inner content is [`ValueStoreInner::Empty`],
-    /// and only by the creator of the current [`JsValueStore`]. We enforce the first
-    /// rule at runtime (and will panic), and the second rule by requiring a mutable
-    /// reference. This is still unsafe and relies on unsafe pointer access.
-    unsafe fn replace(&mut self, other: ValueStoreInner) {
-        let ptr = Arc::as_ptr(&self.0).cast_mut();
-
-        assert!(!ptr.is_null());
-        unsafe {
-            assert!(
-                matches!(*ptr, ValueStoreInner::Empty),
-                "ValueStoreInner must be empty."
-            );
-
-            *ptr = other;
-        }
-    }
-
-    /// A still-being-constructed value.
-    fn empty() -> Self {
-        Self(Arc::new(ValueStoreInner::Empty))
-    }
-
-    fn new(inner: ValueStoreInner) -> Self {
-        Self(Arc::new(inner))
-    }
-
     /// Create a context-free [`JsValue`] equivalent from an existing `JsValue` and the
     /// [`Context`] that was used to create it. The `transfer` argument allows for
     /// transferring ownership of the inner data to the context-free value instead of
@@ -214,6 +185,33 @@ impl JsValueStore {
             .collect::<Result<FxHashSet<_>, _>>()?;
 
         let v = from::try_from_js_value(value, &transfer, &mut seen, context)?;
-        Ok(v)
+        Ok(Self {
+            root: v,
+            graph: Arc::new(seen.nodes),
+        })
     }
 }
+
+// Shared across nested structuredClone calls made by getters, including calls
+// crossing contexts on the same VM thread. Drop restores the budget on errors.
+thread_local! { static ACTIVE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+struct Traversal;
+impl Traversal {
+    fn enter() -> JsResult<Self> {
+        ACTIVE_DEPTH.with(|depth| {
+            if depth.get() >= 64 {
+                return Err(js_error!(RangeError: "Structured clone depth exceeded"));
+            }
+            depth.set(depth.get() + 1);
+            Ok(Self)
+        })
+    }
+}
+impl Drop for Traversal {
+    fn drop(&mut self) {
+        ACTIVE_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+#[cfg(test)]
+mod tests;

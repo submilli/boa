@@ -83,6 +83,9 @@ pub(super) fn log_object_to_internal(
     indent: usize,
     print_internals: bool,
 ) -> fmt::Result {
+    if indent > 128 {
+        return f.write_str("[Object]");
+    }
     if let Some(v) = data.as_object() {
         // The in-memory address of the current object
         let addr = std::ptr::from_ref(v.as_ref()).addr();
@@ -233,6 +236,12 @@ impl JsValue {
     /// A helper function for specifically printing object values
     #[must_use]
     pub fn display_obj(&self, print_internals: bool) -> String {
+        self.display_obj_view(print_internals).to_string()
+    }
+
+    /// Format object inspection directly into the caller's output sink.
+    #[must_use]
+    pub fn display_obj_view(&self, print_internals: bool) -> impl Display + '_ {
         struct DisplayObj<'a>(&'a JsValue, bool);
         impl Display for DisplayObj<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -240,6 +249,6 @@ impl JsValue {
             }
         }
 
-        DisplayObj(self, print_internals).to_string()
+        DisplayObj(self, print_internals)
     }
 }
