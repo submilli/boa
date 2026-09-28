@@ -140,11 +140,61 @@ impl From<ActiveRunnable> for Referrer {
     }
 }
 
+type LoadContinuation = dyn FnOnce(JsResult<Module>, &mut Context) -> JsResult<()>;
+
+/// An owned continuation for one host module load. Hosts may retain this value
+/// across event-loop turns without borrowing the engine context.
+///
+/// Completing a load queues a job in the requesting realm to run the engine
+/// continuation. The host must complete each request exactly once, or discard
+/// it only when tearing down the requesting realm.
+pub struct ModuleLoadCompletion {
+    realm: Realm,
+    continuation: Box<LoadContinuation>,
+}
+
+impl std::fmt::Debug for ModuleLoadCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModuleLoadCompletion")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ModuleLoadCompletion {
+    pub(crate) fn new(
+        realm: Realm,
+        continuation: impl FnOnce(JsResult<Module>, &mut Context) -> JsResult<()> + 'static,
+    ) -> Self {
+        Self {
+            realm,
+            continuation: Box::new(continuation),
+        }
+    }
+
+    /// Queue the engine continuation using the requesting realm.
+    ///
+    /// This never enters JavaScript or walks the module graph inline. Even an
+    /// immediately available cached dependency crosses the job boundary, so a
+    /// deep import chain does not become native recursion. Continuation errors
+    /// are reported by the job executor.
+    pub fn complete(self, result: JsResult<Module>, context: &mut Context) {
+        context.enqueue_job(
+            crate::job::PromiseJob::with_realm(
+                move |context| {
+                    (self.continuation)(result, context)?;
+                    Ok(crate::JsValue::undefined())
+                },
+                self.realm,
+            )
+            .into(),
+        );
+    }
+}
+
 /// Module loading related host hooks.
 ///
 /// This trait allows to customize the behaviour of the engine on module load requests and
 /// `import.meta` requests.
-#[dynify]
 pub trait ModuleLoader: Any {
     /// Host hook [`HostLoadImportedModule ( referrer, specifier, hostDefined, payload )`][spec].
     ///
@@ -176,6 +226,32 @@ pub trait ModuleLoader: Any {
         context: &RefCell<&mut Context>,
     ) -> JsResult<Module>;
 
+    /// Begin a host module load with an owned completion continuation.
+    ///
+    /// Event-loop embedders can override this hook to retain `completion` until
+    /// host I/O finishes, then call it using the current context. This avoids
+    /// retaining a context-borrowing future between synchronous engine calls.
+    /// The result consistency requirements of `load_imported_module` apply.
+    /// The default implementation adapts the async loader through a native job.
+    fn load_imported_module_with_completion(
+        self: Rc<Self>,
+        referrer: Referrer,
+        request: ModuleRequest,
+        completion: ModuleLoadCompletion,
+        context: &mut Context,
+    ) {
+        let job = crate::job::NativeAsyncJob::with_realm(
+            async move |context| {
+                let future = self.load_imported_module(referrer, request, context);
+                let result = future.await;
+                completion.complete(result, &mut context.borrow_mut());
+                Ok(crate::JsValue::undefined())
+            },
+            context.realm().clone(),
+        );
+        context.enqueue_job(job.into());
+    }
+
     /// Host hooks [`HostGetImportMetaProperties ( moduleRecord )`][meta] and
     /// [`HostFinalizeImportMeta ( importMeta, moduleRecord )`][final].
     ///
@@ -196,6 +272,38 @@ pub trait ModuleLoader: Any {
         context: &mut Context,
     ) {
     }
+}
+
+// dynify copies default method bodies into its generated trait. A body calling
+// the async method cannot type-check as both a Future and dynify's constructor.
+// A remote signature-only trait keeps that adapter in ModuleLoader alone.
+#[dynify(remote = "ModuleLoader")]
+/// Object-safe dispatch for [`ModuleLoader`].
+pub trait DynModuleLoader: Any {
+    /// See [`ModuleLoader::load_imported_module`].
+    async fn load_imported_module(
+        self: Rc<Self>,
+        referrer: Referrer,
+        request: ModuleRequest,
+        context: &RefCell<&mut Context>,
+    ) -> JsResult<Module>;
+
+    /// See [`ModuleLoader::load_imported_module_with_completion`].
+    fn load_imported_module_with_completion(
+        self: Rc<Self>,
+        referrer: Referrer,
+        request: ModuleRequest,
+        completion: ModuleLoadCompletion,
+        context: &mut Context,
+    );
+
+    /// See [`ModuleLoader::init_import_meta`].
+    fn init_import_meta(
+        self: Rc<Self>,
+        import_meta: &JsObject,
+        module: &Module,
+        context: &mut Context,
+    );
 }
 
 /// A module loader that throws when trying to load any modules.

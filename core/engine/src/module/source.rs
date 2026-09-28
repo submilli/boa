@@ -1,11 +1,4 @@
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    hash::BuildHasherDefault,
-    mem::MaybeUninit,
-    path::PathBuf,
-    rc::Rc,
-};
+use std::{cell::Cell, collections::HashSet, hash::BuildHasherDefault, path::PathBuf, rc::Rc};
 
 use boa_ast::{
     declaration::{
@@ -21,7 +14,6 @@ use boa_ast::{
 use boa_gc::{Finalize, Gc, GcRefCell, Trace};
 use boa_interner::Interner;
 use boa_macros::js_str;
-use dynify::Dynify;
 use indexmap::IndexSet;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
@@ -31,7 +23,6 @@ use crate::{
     builtins::{Promise, promise::PromiseCapability},
     bytecompiler::{BindingAccessOpcode, ByteCompiler, FunctionSpec, ToJsString},
     environments::{DeclarativeEnvironment, EnvironmentStack},
-    job::NativeAsyncJob,
     js_string,
     module::ModuleKind,
     object::{FunctionObjectBuilder, JsPromise},
@@ -506,22 +497,13 @@ impl SourceTextModule {
         /// [load]: https://tc39.es/ecma262/#sec-HostLoadImportedModule
         /// [finish]: https://tc39.es/ecma262/#sec-FinishLoadingImportedModule
         /// [continue]: https://tc39.es/ecma262/#sec-ContinueModuleLoading
-        async fn finish_loading_imported_module(
+        fn finish_loading_imported_module(
             request: super::ModuleRequest,
-            src: Module,
-            state: Rc<GraphLoadingState>,
-            context: &RefCell<&mut Context>,
+            src: &Module,
+            state: &Rc<GraphLoadingState>,
+            completion: JsResult<Module>,
+            context: &mut Context,
         ) -> JsResult<()> {
-            let loader = context.borrow().module_loader();
-            let fut = loader.load_imported_module(
-                Referrer::Module(src.clone()),
-                request.clone(),
-                context,
-            );
-            let mut stack = [MaybeUninit::<u8>::uninit(); 16];
-            let mut heap = Vec::<MaybeUninit<u8>>::new();
-            let completion = fut.init2(&mut stack, &mut heap).await;
-
             // FinishLoadingImportedModule ( referrer, specifier, payload, result )
             // https://tc39.es/ecma262/#sec-FinishLoadingImportedModule
 
@@ -558,20 +540,20 @@ impl SourceTextModule {
             match completion {
                 Ok(m) => {
                     // a. Perform InnerModuleLoading(state, moduleCompletion.[[Value]]).
-                    m.inner_load(&state, &mut context.borrow_mut());
+                    m.inner_load(state, context);
                 }
                 // 3. Else,
                 Err(err) => {
                     // a. Set state.[[IsLoading]] to false.
                     state.loading.set(false);
 
-                    let err = err.into_opaque(&mut context.borrow_mut())?;
+                    let err = err.into_opaque(context)?;
 
                     // b. Perform ! Call(state.[[PromiseCapability]].[[Reject]], undefined, « moduleCompletion.[[Value]] »).
                     state
                         .capability
                         .reject()
-                        .call(&JsValue::undefined(), &[err], &mut context.borrow_mut())
+                        .call(&JsValue::undefined(), &[err], context)
                         .js_expect("cannot fail for the default reject function")?;
                 }
             }
@@ -608,14 +590,20 @@ impl SourceTextModule {
                     let request = required.clone();
                     let src = module_self.clone();
                     let state = state.clone();
-                    let async_job = NativeAsyncJob::with_realm(
-                        async move |context| {
-                            finish_loading_imported_module(request, src, state, context).await?;
-                            Ok(JsValue::undefined())
-                        },
+                    let completion = super::ModuleLoadCompletion::new(
                         context.realm().clone(),
+                        move |result, context| {
+                            finish_loading_imported_module(request, &src, &state, result, context)
+                        },
                     );
-                    context.enqueue_job(async_job.into());
+                    context
+                        .module_loader()
+                        .load_imported_module_with_completion(
+                            Referrer::Module(module_self.clone()),
+                            required.clone(),
+                            completion,
+                            context,
+                        );
                 }
                 // iii. If state.[[IsLoading]] is false, return unused.
                 if !state.loading.get() {
