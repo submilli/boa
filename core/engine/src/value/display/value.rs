@@ -293,7 +293,7 @@ mod safety_tests {
             let value = cx.eval(Source::from_bytes(code)).unwrap();
             let text = value.display().to_string();
             assert!(text.contains("[Object]"));
-            assert!(text.len() < 100000);
+            assert!(text.len() < 100_000);
         }
     }
 }
