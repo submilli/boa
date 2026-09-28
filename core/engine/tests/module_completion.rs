@@ -202,3 +202,38 @@ fn existing_async_loader_uses_the_default_adapter() {
         Some(true)
     );
 }
+
+#[test]
+fn evaluation_boundary_ignores_helper_provenance_and_survives_await() {
+    let context = &mut Context::default();
+    context
+        .register_global_callable(
+            boa_engine::js_string!("inModule"),
+            0,
+            boa_engine::NativeFunction::from_fn_ptr(|_, _, context| {
+                Ok(matches!(
+                    context.get_active_evaluation(),
+                    Some(boa_engine::vm::ActiveRunnable::Module(_))
+                )
+                .into())
+            }),
+        )
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.classicHelper=()=>inModule()",
+        ))
+        .unwrap();
+    let module = Module::parse(Source::from_bytes("globalThis.before=classicHelper(); globalThis.moduleHelper=()=>inModule(); await Promise.resolve(); globalThis.after=classicHelper()"), None, context).unwrap();
+    let promise = module.load_link_evaluate(context);
+    context.run_jobs().unwrap();
+    assert!(matches!(promise.state(), PromiseState::Fulfilled(_)));
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("before && after && !moduleHelper()"))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert!(context.get_active_evaluation().is_none());
+}

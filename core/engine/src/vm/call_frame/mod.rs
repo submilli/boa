@@ -33,6 +33,10 @@ bitflags::bitflags! {
 
         /// If the `this` value has been cached.
         const THIS_VALUE_CACHED = 0b0000_1000;
+
+        /// A Script or SourceTextModule evaluation entry, not a function call.
+        /// Retained when a top-level-await frame is suspended and resumed.
+        const EVALUATION_ROOT = 0b0001_0000;
     }
 }
 

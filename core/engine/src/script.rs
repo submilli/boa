@@ -227,7 +227,7 @@ impl Script {
                 self.inner.realm.clone(),
             )
             .with_env_fp(0)
-            .with_flags(CallFrameFlags::EXIT_EARLY),
+            .with_flags(CallFrameFlags::EXIT_EARLY | CallFrameFlags::EVALUATION_ROOT),
             JsValue::undefined(),
             JsValue::null(),
         );

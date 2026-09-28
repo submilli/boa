@@ -870,6 +870,25 @@ impl Context {
             .find_map(|frame| frame.active_runnable.clone())
     }
 
+    /// Return the innermost active script or module evaluation entry.
+    ///
+    /// Unlike `get_active_script_or_module`, this skips function calls and
+    /// reports the evaluation that invoked them, not the source where a helper
+    /// function was defined. A suspended module is absent until its top-level
+    /// await continuation resumes. Embedders can use this to distinguish host
+    /// script boundaries while preserving nested script evaluation.
+    #[must_use]
+    pub fn get_active_evaluation(&self) -> Option<ActiveRunnable> {
+        std::iter::once(self.vm.frame())
+            .chain(self.vm.frames.iter().rev())
+            .find(|frame| {
+                frame
+                    .flags
+                    .contains(crate::vm::CallFrameFlags::EVALUATION_ROOT)
+            })
+            .and_then(|frame| frame.active_runnable.clone())
+    }
+
     /// Get `active function object`
     ///
     /// More information:

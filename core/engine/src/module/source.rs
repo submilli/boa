@@ -1973,7 +1973,7 @@ impl SourceTextModule {
             realm,
         )
         .with_env_fp(env_fp)
-        .with_flags(CallFrameFlags::EXIT_EARLY);
+        .with_flags(CallFrameFlags::EXIT_EARLY | CallFrameFlags::EVALUATION_ROOT);
 
         // 8. Suspend the running execution context.
         context
