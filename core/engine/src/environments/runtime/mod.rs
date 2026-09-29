@@ -460,6 +460,15 @@ impl Context {
     /// are completely removed of runtime checks because the specification guarantees that runtime
     /// semantics cannot add or remove lexical bindings.
     pub(crate) fn find_runtime_binding(&mut self, locator: &mut BindingLocator) -> JsResult<()> {
+        // A later Script can add global lexical bindings after this function
+        // was compiled. Resolve those before the unpoisoned fast path; `with`
+        // and eval environments below still get their usual shadowing checks.
+        if locator.scope() == BindingLocatorScope::GlobalObject
+            && let Some(binding) = self.vm.frame().realm.scope().get_binding(locator.name())
+        {
+            locator.set_scope(binding.scope());
+            locator.set_binding_index(binding.binding_index());
+        }
         let deleted_binding = self.is_deleted_binding(locator);
 
         let global = self.vm.frame().realm.environment();
@@ -684,7 +693,13 @@ impl Context {
                 obj.set(key, value, strict, self)?;
             }
             BindingLocatorScope::GlobalDeclarative => {
-                let env = self.vm.frame().realm.environment();
+                let realm = &self.vm.frame().realm;
+                if realm.scope().is_binding_mutable(locator.name()) == Some(false) {
+                    return Err(crate::JsNativeError::typ()
+                        .with_message("cannot mutate an immutable global binding")
+                        .into());
+                }
+                let env = realm.environment();
                 env.set(locator.binding_index(), value);
             }
             BindingLocatorScope::Stack(index) => match self.environment_expect(index) {
