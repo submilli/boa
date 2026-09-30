@@ -31,6 +31,9 @@ mod tests;
 
 pub(crate) mod internal_methods;
 
+/// Safe property hooks for embedder-defined exotic objects.
+pub mod native_exotic;
+
 pub mod builtins;
 mod datatypes;
 mod jsobject;

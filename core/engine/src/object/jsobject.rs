@@ -239,13 +239,15 @@ impl JsObject {
         data: T,
     ) -> JsObject<T> {
         let internal_methods = data.internal_methods();
+        let properties = if data.requires_unique_shape() {
+            PropertyMap::from_prototype_unique_shape(prototype.into())
+        } else {
+            PropertyMap::from_prototype_with_shared_shape(root_shape, prototype.into())
+        };
         let inner = Gc::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
-                properties: PropertyMap::from_prototype_with_shared_shape(
-                    root_shape,
-                    prototype.into(),
-                ),
+                properties,
                 extensible: true,
                 private_elements: ThinVec::new(),
             }),
@@ -1078,13 +1080,15 @@ impl<T: NativeObject> JsObject<T> {
     /// ```
     pub fn new<O: Into<Option<JsObject>>>(root_shape: &RootShape, prototype: O, data: T) -> Self {
         let internal_methods = data.internal_methods();
+        let properties = if data.requires_unique_shape() {
+            PropertyMap::from_prototype_unique_shape(prototype.into())
+        } else {
+            PropertyMap::from_prototype_with_shared_shape(root_shape, prototype.into())
+        };
         let inner = Gc::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
-                properties: PropertyMap::from_prototype_with_shared_shape(
-                    root_shape,
-                    prototype.into(),
-                ),
+                properties,
                 extensible: true,
                 private_elements: ThinVec::new(),
             }),

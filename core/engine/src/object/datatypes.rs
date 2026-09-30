@@ -39,6 +39,13 @@ use super::internal_methods::{InternalObjectMethods, ORDINARY_INTERNAL_METHODS};
 /// assert_eq!(object.downcast_ref::<CustomStruct>().unwrap().counter, 5);
 /// ```
 pub trait JsData {
+    /// Whether this payload needs a shape that cannot be shared with other objects.
+    /// Native exotic adapters require this to prevent ordinary inline-cache hits
+    /// from bypassing their property hooks, regardless of the constructor used.
+    fn requires_unique_shape(&self) -> bool {
+        false
+    }
+
     #[doc(hidden)]
     fn internal_methods(&self) -> &'static InternalObjectMethods
     where
