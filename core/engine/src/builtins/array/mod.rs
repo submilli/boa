@@ -988,6 +988,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1756,6 +1757,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let O be ToObject(this value)
         let o = this.to_object(context)?;
 
@@ -1813,6 +1815,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let O be ToObject(this value)
         let o = this.to_object(context)?;
 
@@ -1860,6 +1863,7 @@ impl Array {
         this_arg: &JsValue,
         context: &mut Context,
     ) -> JsResult<u64> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Assert target is Object
         // 2. Assert source is Object
 

@@ -47,6 +47,7 @@ mod call_frame;
 mod code_block;
 mod completion_record;
 mod inline_cache;
+mod native_recursion;
 mod runtime_limits;
 
 pub(crate) mod opcode;
@@ -93,6 +94,9 @@ pub struct Vm {
     /// [`JsObject::call`](crate::object::JsObject::call) and
     /// [`JsObject::construct`](crate::object::JsObject::construct).
     pub(crate) host_call_depth: usize,
+
+    /// Active recursive native data walks, including callback reentry.
+    native_recursion_depth: std::rc::Rc<std::cell::Cell<usize>>,
 
     pub(crate) shadow_stack: ShadowStack,
 
@@ -420,6 +424,7 @@ impl Vm {
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,
             host_call_depth: 0,
+            native_recursion_depth: std::rc::Rc::default(),
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
             trace: false,
@@ -1032,7 +1037,9 @@ impl Context {
         // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
         // `Context::run()` recursively (for example, accessor calls).
         // Subtract 1 to exclude the dummy frame at index 0.
-        let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
+        let recursion_depth = (self.vm.frames.len() - 1)
+            .saturating_add(self.vm.host_call_depth)
+            .saturating_add(self.vm.native_recursion_depth.get());
         if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
             return Err(RuntimeLimitError::Recursion.into());
         }

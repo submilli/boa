@@ -236,6 +236,7 @@ impl Json {
     /// [spec]: https://tc39.es/ecma262/#sec-json.parse
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/JSON/parse
     pub(crate) fn parse(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let jsonString be ? ToString(text).
         let json_string = args
             .first()
@@ -370,6 +371,7 @@ impl Json {
         source_node: Option<&JsonNode>,
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let val be ? Get(holder, name).
         let val = holder.get(name.clone(), context)?;
 
@@ -624,6 +626,7 @@ impl Json {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let indent be the empty String.
         let indent = js_string!();
 
@@ -771,6 +774,7 @@ impl Json {
         holder: &JsObject,
         context: &mut Context,
     ) -> JsResult<Option<JsString>> {
+        let _recursion = context.enter_native_recursion()?;
         // 1. Let value be ? Get(holder, key).
         let mut value = holder.get(key.clone(), context)?;
 
