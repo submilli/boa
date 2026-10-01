@@ -766,12 +766,26 @@ impl JsObject {
 
             if let Some(key_str) = key_str {
                 // i. Let desc be ? O.[[GetOwnProperty]](key).
-                let desc = self
-                    .__get_own_property__(&key, &mut InternalMethodPropertyContext::new(context))?;
+                let host_enumerable = match (kind, self.vtable().is_enumerable_own_property) {
+                    (PropertyNameKind::Key, Some(hook)) => hook(
+                        self,
+                        &key,
+                        super::native_exotic::NativeKeyEnumeration::Own,
+                        context,
+                    )?,
+                    _ => None,
+                };
+                let enumerable = match host_enumerable {
+                    Some(enumerable) => enumerable,
+                    None => self
+                        .__get_own_property__(
+                            &key,
+                            &mut InternalMethodPropertyContext::new(context),
+                        )?
+                        .is_some_and(|descriptor| descriptor.expect_enumerable()),
+                };
                 // ii. If desc is not undefined and desc.[[Enumerable]] is true, then
-                if let Some(desc) = desc
-                    && desc.expect_enumerable()
-                {
+                if enumerable {
                     match kind {
                         // 1. If kind is key, append key to properties.
                         PropertyNameKind::Key => properties.push(key_str.into()),

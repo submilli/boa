@@ -387,6 +387,7 @@ pub(crate) const ORDINARY_INTERNAL_METHODS: InternalObjectMethods = InternalObje
     __set__: ordinary_set,
     __delete__: ordinary_delete,
     __own_property_keys__: ordinary_own_property_keys,
+    is_enumerable_own_property: None,
     __call__: non_existent_call,
     __construct__: non_existent_construct,
 };
@@ -441,6 +442,15 @@ pub struct InternalObjectMethods {
         fn(&JsObject, &PropertyKey, &mut InternalMethodPropertyContext<'_>) -> JsResult<bool>,
     pub(crate) __own_property_keys__:
         fn(&JsObject, context: &mut Context) -> JsResult<Vec<PropertyKey>>,
+    // Embedder enumeration eligibility; ordinary objects and Proxies use descriptors.
+    pub(crate) is_enumerable_own_property: Option<
+        fn(
+            &JsObject,
+            &PropertyKey,
+            super::native_exotic::NativeKeyEnumeration,
+            &mut Context,
+        ) -> JsResult<Option<bool>>,
+    >,
     pub(crate) __call__: fn(
         &JsObject,
         argument_count: usize,

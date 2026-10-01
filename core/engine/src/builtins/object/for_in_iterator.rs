@@ -106,11 +106,26 @@ impl ForInIterator {
                 iterator.object_was_visited = true;
             }
             while let Some(r) = iterator.remaining_keys.pop_front() {
-                if !iterator.visited_keys.contains(&r)
-                    && let Some(desc) = object.__get_own_property__(
-                        &PropertyKey::from(r.clone()),
-                        &mut InternalMethodPropertyContext::new(context),
+                if iterator.visited_keys.contains(&r) {
+                    continue;
+                }
+                let key = PropertyKey::from(r.clone());
+                if let Some(hook) = object.vtable().is_enumerable_own_property
+                    && let Some(enumerable) = hook(
+                        &object,
+                        &key,
+                        crate::object::native_exotic::NativeKeyEnumeration::ForIn,
+                        context,
                     )?
+                {
+                    iterator.visited_keys.insert(r.clone());
+                    if enumerable {
+                        return Ok(create_iter_result_object(JsValue::new(r), false, context));
+                    }
+                    continue;
+                }
+                if let Some(desc) = object
+                    .__get_own_property__(&key, &mut InternalMethodPropertyContext::new(context))?
                 {
                     iterator.visited_keys.insert(r.clone());
                     if desc.expect_enumerable() {

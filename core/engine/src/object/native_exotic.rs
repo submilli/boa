@@ -12,6 +12,15 @@ use super::shape::slot::SlotAttributes;
 use crate::property::{PropertyDescriptor, PropertyKey};
 use crate::{Context, Finalize, JsData, JsObject, JsResult, JsValue, Trace};
 
+/// Key enumeration operations that browser host objects may distinguish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeKeyEnumeration {
+    /// Own enumerable keys for `Object.keys` and JSON serialization.
+    Own,
+    /// Keys used by `for...in`, including prototype traversal.
+    ForIn,
+}
+
 /// Native property hooks. Defaults use ordinary algorithms; get/has follow the
 /// overridden own descriptors, including through prototype chains.
 ///
@@ -54,6 +63,25 @@ pub trait NativeExotic: Trace + Sized + 'static {
     fn own_property_keys(object: &JsObject, context: &mut Context) -> JsResult<Vec<PropertyKey>> {
         ordinary::own_property_keys(object, context)
     }
+    /// Selects a string key for `Object.keys`, JSON serialization, and `for...in`.
+    ///
+    /// Return `None` to use the object's own descriptor (the default).
+    /// `Some(true)` emits the name and marks it visited during `for...in`.
+    /// `Some(false)` suppresses the name, including a same-named prototype
+    /// property during `for...in`. Some browser host objects expose supported names in enumeration even when prototype visibility hides their
+    /// own descriptor. This hook is called per key after `[[OwnPropertyKeys]]`,
+    /// keeping each eligibility check live rather than caching host answers.
+    /// `Object.values`, `Object.entries`, and wrapping Proxies keep their
+    /// ECMAScript descriptor filtering.
+    fn is_enumerable_own_property(
+        object: &JsObject,
+        key: &PropertyKey,
+        kind: NativeKeyEnumeration,
+        context: &mut Context,
+    ) -> JsResult<Option<bool>> {
+        let _ = (object, key, kind, context);
+        Ok(None)
+    }
     /// Implements `[[PreventExtensions]]`; see the ordinary helper for fallback behavior.
     fn prevent_extensions(object: &JsObject, context: &mut Context) -> JsResult<bool> {
         ordinary::prevent_extensions(object, context)
@@ -81,6 +109,7 @@ impl<T: NativeExotic> NativeExoticObject<T> {
         __set__: Self::set,
         __delete__: Self::delete,
         __own_property_keys__: Self::own_property_keys,
+        is_enumerable_own_property: Some(Self::is_enumerable_own_property),
         __prevent_extensions__: Self::prevent_extensions,
         __get__: Self::get,
         __try_get__: Self::try_get,
@@ -165,6 +194,15 @@ impl<T: NativeExotic> NativeExoticObject<T> {
     fn own_property_keys(object: &JsObject, context: &mut Context) -> JsResult<Vec<PropertyKey>> {
         let _recursion = context.enter_native_recursion()?;
         T::own_property_keys(object, context)
+    }
+    fn is_enumerable_own_property(
+        object: &JsObject,
+        key: &PropertyKey,
+        kind: NativeKeyEnumeration,
+        context: &mut Context,
+    ) -> JsResult<Option<bool>> {
+        let _recursion = context.enter_native_recursion()?;
+        T::is_enumerable_own_property(object, key, kind, context)
     }
     fn prevent_extensions(object: &JsObject, context: &mut Context) -> JsResult<bool> {
         let _recursion = context.enter_native_recursion()?;
