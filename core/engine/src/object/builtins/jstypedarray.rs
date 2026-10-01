@@ -30,26 +30,13 @@ impl JsTypedArray {
         TypedArray::validate(&self.inner.clone().into(), Ordering::SeqCst).map(|_| ())
     }
 
-    /// Recover a view's internal shape against a previously captured backing
-    /// buffer length. Structured serialization uses this after transferring that
-    /// buffer, when its ordinary getters would report detached dimensions.
-    ///
-    /// # Errors
-    /// Returns a type error when the captured buffer cannot contain the view.
-    pub fn shape_for_buffer_length(&self, byte_length: usize) -> JsResult<(usize, usize)> {
-        let array = self
-            .inner
+    /// Whether the internal view length tracks its resizable backing buffer.
+    #[must_use]
+    pub fn is_length_tracking(&self) -> bool {
+        self.inner
             .downcast_ref::<TypedArray>()
-            .expect("JsTypedArray is branded");
-        if array.is_out_of_bounds(byte_length) {
-            return Err(JsNativeError::typ()
-                .with_message("Typed array is out of bounds")
-                .into());
-        }
-        Ok((
-            array.byte_offset() as usize,
-            array.array_length(byte_length) as usize,
-        ))
+            .expect("JsTypedArray is branded")
+            .is_auto_length()
     }
 
     /// Create a [`JsTypedArray`] from a [`JsObject`], if the object is not a typed array throw a
@@ -1375,23 +1362,71 @@ pub fn js_typed_array_from_kind(
     }
 }
 
-/// Create a fixed-length view using the intrinsic constructor, without consulting
-/// page-replaceable constructor properties.
+/// Restore a fixed or tracking serialized view without consulting page properties.
+/// Resizable views retain captured slots even if serialization getters shrank the buffer.
 ///
 /// # Errors
 /// Returns the intrinsic constructor error for an invalid range or buffer.
 pub fn js_typed_array_view_from_kind(
     kind: TypedArrayKind,
-    buffer: JsArrayBuffer,
+    buffer: JsObject,
     byte_offset: usize,
-    length: usize,
+    length: Option<usize>,
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    // A later serialization getter may have shrunk a transferred resizable
+    // buffer. Restore the captured slots, even when the view is now out of bounds.
+    if let Ok(backing) = buffer
+        .clone()
+        .downcast::<crate::builtins::array_buffer::ArrayBuffer>()
+    {
+        let maximum = {
+            let backing = backing.borrow();
+            if backing.data().data().is_none() {
+                return Err(JsNativeError::typ()
+                    .with_message("Serialized buffer is detached")
+                    .into());
+            }
+            backing.data().max_byte_length()
+        };
+        if let Some(maximum) = maximum {
+            let offset = byte_offset as u64;
+            let byte_length = match length {
+                Some(n) => Some((n as u64).checked_mul(kind.element_size()).ok_or_else(|| {
+                    JsNativeError::range().with_message("Invalid serialized view length")
+                })?),
+                None => None,
+            };
+            let end = offset.checked_add(byte_length.unwrap_or(0));
+            if !offset.is_multiple_of(kind.element_size()) || end.is_none_or(|end| end > maximum) {
+                return Err(JsNativeError::range()
+                    .with_message("Invalid serialized view range")
+                    .into());
+            }
+            let prototype =
+                kind.standard_constructor()(context.intrinsics().constructors()).prototype();
+            return Ok(JsObject::from_proto_and_data(
+                Some(prototype),
+                TypedArray::new(
+                    crate::builtins::array_buffer::BufferObject::Buffer(backing),
+                    kind,
+                    offset,
+                    byte_length,
+                    length.map(|n| n as u64),
+                ),
+            )
+            .into());
+        }
+    }
     let constructor =
         kind.standard_constructor()(context.intrinsics().constructors()).constructor();
     constructor
         .construct(
-            &[buffer.into(), byte_offset.into(), length.into()],
+            &[
+                buffer.into(),
+                byte_offset.into(),
+                length.map_or_else(JsValue::undefined, Into::into),
+            ],
             None,
             context,
         )

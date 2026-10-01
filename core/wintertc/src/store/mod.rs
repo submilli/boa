@@ -4,29 +4,33 @@ use boa_engine::builtins::array_buffer::{AlignedVec, SharedArrayBuffer};
 use boa_engine::builtins::error::ErrorKind;
 use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::value::TryIntoJs;
-use boa_engine::{Context, JsError, JsResult, JsString, JsValue, JsVariant, js_error};
+use boa_engine::{Context, JsError, JsResult, JsString, JsValue, js_error};
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
+mod errors;
 mod from;
 mod to;
 
 /// Convenience method to avoid copy-pasting the same message.
 #[inline]
 fn unsupported_type() -> JsError {
-    js_error!(Error: "DataCloneError: unsupported type for structured data")
+    DataCloneError::error()
 }
 
 #[inline]
 fn unsupported_transfer() -> JsError {
-    js_error!(TypeError: "Found an invalid value in transferList")
+    DataCloneError::error()
 }
 
-/// Native marker for storage serialization rejection. It contains no page data.
+/// Native marker for structured serialization rejection. It contains no page data.
 #[derive(Debug, boa_engine::Trace, boa_engine::Finalize, boa_engine::JsData)]
-pub struct StorageDataCloneError;
+pub struct DataCloneError;
 
-impl StorageDataCloneError {
+/// Compatibility name for storage callers. All serializer rejection uses one marker.
+pub type StorageDataCloneError = DataCloneError;
+
+impl DataCloneError {
     /// Distinguish an engine rejection from an exception thrown by a getter.
     #[must_use]
     pub fn is_error(error: &JsError) -> bool {
@@ -94,6 +98,9 @@ enum ValueStoreInner {
     /// of it is, though.
     BigInt(RawBigInt),
 
+    /// A boxed primitive with its own object identity.
+    Boxed(NodeId),
+
     /// A dictionary of strings to values which should be reconstructed into
     /// a `JsObject`. Note: the prototype and constructor are not maintained,
     /// and during reconstruction the default `Object` prototype will be used.
@@ -116,14 +123,12 @@ enum ValueStoreInner {
     /// the system's datetime library to be reconstructed and may diverge.
     Date(f64),
 
-    /// Allowed error types (see the structured clone algorithm page).
-    #[expect(unused)]
+    /// Error data uses edges for causes, including self references.
     Error {
         kind: ErrorKind,
-        name: StringStore,
-        message: StringStore,
-        stack: StringStore,
-        cause: StringStore,
+        message: Option<StringStore>,
+        stack: Option<StringStore>,
+        cause: Option<NodeId>,
     },
 
     /// Regular expression. We store the expression and its flags. Everything else
@@ -135,7 +140,10 @@ enum ValueStoreInner {
     },
 
     /// Array Buffer.
-    ArrayBuffer(AlignedVec<u8>),
+    ArrayBuffer {
+        data: AlignedVec<u8>,
+        max_byte_length: Option<u64>,
+    },
 
     /// Shared Array Buffer.
     SharedArrayBuffer(SharedArrayBuffer),
@@ -143,7 +151,7 @@ enum ValueStoreInner {
     /// Dataview.
     DataView {
         buffer: NodeId,
-        byte_length: u64,
+        byte_length: Option<u64>,
         byte_offset: u64,
     },
 
@@ -152,7 +160,7 @@ enum ValueStoreInner {
         kind: TypedArrayKind,
         buffer: NodeId,
         byte_offset: usize,
-        length: usize,
+        length: Option<usize>,
     },
 }
 
@@ -176,18 +184,14 @@ impl ValueStoreInner {
             Self::Map(entries) => entries.capacity() * size_of::<(NodeId, NodeId)>(),
             Self::Set(entries) => entries.capacity() * size_of::<NodeId>(),
             Self::RegExp { source, flags } => (source.0.capacity() + flags.0.capacity()) * 2,
-            Self::ArrayBuffer(data) => data.capacity(),
-            Self::Error {
-                name,
-                message,
-                stack,
-                cause,
-                ..
-            } => [name, message, stack, cause]
+            Self::ArrayBuffer { data, .. } => data.capacity(),
+            Self::Error { message, stack, .. } => message
                 .iter()
+                .chain(stack.iter())
                 .map(|s| s.0.capacity() * 2)
                 .sum(),
             Self::Empty
+            | Self::Boxed(_)
             | Self::Null
             | Self::Undefined
             | Self::Boolean(_)
@@ -269,16 +273,23 @@ impl JsValueStore {
         storage: bool,
     ) -> JsResult<Self> {
         let mut seen = from::SeenMap::new(storage);
-        // Verify the validity of the transfer list and make it a set.
-        let transfer = transfer
-            .into_iter()
-            .map(|v| match v.variant() {
-                JsVariant::Object(o) if from::is_transferable(&o) => Ok(o),
-                _ => Err(unsupported_transfer()),
-            })
-            .collect::<Result<FxHashSet<_>, _>>()?;
-
-        let v = from::try_from_js_value(value, &transfer, &mut seen, context)?;
+        if transfer.len() > 1024 {
+            return Err(js_error!(RangeError: "Structured clone transfer limit exceeded"));
+        }
+        let mut unique = FxHashSet::default();
+        let mut objects = Vec::with_capacity(transfer.len());
+        for value in transfer {
+            let object = value.as_object().ok_or_else(unsupported_transfer)?;
+            if !from::is_transferable(&object) || !unique.insert(object.clone()) {
+                return Err(unsupported_transfer());
+            }
+            objects.push(object);
+        }
+        // Reserve transferred identities before traversing any getters. Payloads
+        // are captured only after serialization succeeds, including unused entries.
+        seen.reserve_transfers(&objects)?;
+        let v = from::try_from_js_value(value, &mut seen, context)?;
+        seen.finish_transfers(&objects)?;
         Ok(Self {
             root: v,
             retained_bytes: seen.retained_bytes(),

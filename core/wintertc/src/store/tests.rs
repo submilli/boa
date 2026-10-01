@@ -290,3 +290,128 @@ fn native_collection_snapshots_skip_deleted_entries() {
     .unwrap();
     assert_eq!(values, [1.0, 3.0]);
 }
+
+#[test]
+fn transfer_validation_and_serialization_failures_do_not_detach() {
+    let mut cx = context();
+    for source in [
+        "var buffer = new ArrayBuffer(8); ({buffer, invalid:()=>{}})",
+        "var buffer = new ArrayBuffer(8); ({buffer, get failure(){throw 42}})",
+    ] {
+        let value = cx.eval(Source::from_bytes(source)).unwrap();
+        let buffer = cx.eval(Source::from_bytes("buffer")).unwrap();
+        assert!(JsValueStore::try_from_js(&value, &mut cx, vec![buffer]).is_err());
+        assert_eq!(
+            cx.eval(Source::from_bytes("buffer.byteLength")).unwrap(),
+            8.into()
+        );
+    }
+    let buffer = cx.eval(Source::from_bytes("new ArrayBuffer(8)")).unwrap();
+    assert!(
+        JsValueStore::try_from_js(&buffer, &mut cx, vec![buffer.clone(), buffer.clone()]).is_err()
+    );
+    let wrapped =
+        boa_engine::object::builtins::JsArrayBuffer::from_object(buffer.as_object().unwrap())
+            .unwrap();
+    assert_eq!(wrapped.byte_length(), 8);
+}
+
+#[test]
+fn unused_transfers_detach_and_dataview_aliases_survive() {
+    let mut cx = context();
+    let value = cx
+        .eval(Source::from_bytes(
+            "var buffer=new ArrayBuffer(8); [buffer,new DataView(buffer,2,3)]",
+        ))
+        .unwrap();
+    let buffer = cx.eval(Source::from_bytes("buffer")).unwrap();
+    let store = JsValueStore::try_from_js(&value, &mut cx, vec![buffer]).unwrap();
+    let clone = store.try_into_js(&mut cx).unwrap().as_object().unwrap();
+    let view = clone.get(1, &mut cx).unwrap().as_object().unwrap();
+    assert_eq!(
+        view.get(js_string!("buffer"), &mut cx).unwrap(),
+        clone.get(0, &mut cx).unwrap()
+    );
+    assert_eq!(
+        view.get(js_string!("byteOffset"), &mut cx).unwrap(),
+        2.into()
+    );
+    assert_eq!(
+        view.get(js_string!("byteLength"), &mut cx).unwrap(),
+        3.into()
+    );
+    let unused = cx
+        .eval(Source::from_bytes("var unused=new ArrayBuffer(8);unused"))
+        .unwrap();
+    JsValueStore::try_from_js(&JsValue::null(), &mut cx, vec![unused]).unwrap();
+    assert_eq!(
+        cx.eval(Source::from_bytes("unused.byteLength")).unwrap(),
+        0.into()
+    );
+}
+
+#[test]
+fn boxed_values_error_causes_and_resizable_views_preserve_internal_slots() {
+    let mut cx = context();
+    for code in [
+        "const values=[new Number(3),new Boolean(true),new String('a'),Object(4n)];return values.every(v=>{const c=clone(v);return c!==v && Object.prototype.toString.call(c)===Object.prototype.toString.call(v) && c.valueOf()===v.valueOf()})",
+        "const e=new TypeError('bad',{cause:{x:1}});e.extra=3;const c=clone(e);return c instanceof TypeError && c.message==='bad' && c.cause.x===1 && !('extra' in c) && typeof c.stack==='string'",
+        "const e=new Error('self');e.cause=e;const c=clone(e);return c!==e && c.cause===c",
+        "const b=new ArrayBuffer(8,{maxByteLength:16});const c=clone([b,new Uint8Array(b,2),new Uint8Array(b,2,2),new DataView(b,2),new DataView(b,2,2)]);c[0].resize(12);return c[0].resizable && c[0].maxByteLength===16 && c[1].length===10 && c[2].length===2 && c[3].byteLength===10 && c[4].byteLength===2 && c[1].buffer===c[0]",
+    ] {
+        assert!(
+            cx.eval(Source::from_bytes(&format!("(()=>{{{code}}})()")))
+                .unwrap()
+                .to_boolean(),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn transfer_admission_counts_retained_capacity_before_detaching() {
+    use boa_engine::builtins::array_buffer::{AlignedVec, ArrayBuffer};
+    use boa_engine::object::builtins::JsArrayBuffer;
+    let mut cx = context();
+    let mut data = AlignedVec::with_capacity(0, 64);
+    data.resize(32, 0);
+    let buffer = JsArrayBuffer::from_byte_block(data, &mut cx)
+        .unwrap()
+        .with_max_byte_length(64);
+    let object: boa_engine::JsObject = buffer.clone().into();
+    object
+        .downcast_mut::<ArrayBuffer>()
+        .unwrap()
+        .resize(1)
+        .unwrap();
+    let mut seen = from::SeenMap::new(false);
+    seen.reserve_transfers(std::slice::from_ref(&object))
+        .unwrap();
+    // Leave enough admission for the visible byte, but not the retained allocation.
+    // A tiny allocation tests the boundary without exhausting process memory.
+    seen.charge(16 * 1024 * 1024 - 8).unwrap();
+    assert!(seen.finish_transfers(&[object]).is_err());
+    assert_eq!(buffer.byte_length(), 1);
+}
+
+#[test]
+fn transferred_views_keep_captured_slots_after_getter_shrink() {
+    let mut cx = context();
+    let value = cx.eval(Source::from_bytes("var backing=new ArrayBuffer(8,{maxByteLength:16});({typed:new Uint8Array(backing,4,4),view:new DataView(backing,4,4),get after(){backing.resize(2);return 1}})")).unwrap();
+    let buffer = cx.eval(Source::from_bytes("backing")).unwrap();
+    let store = JsValueStore::try_from_js(&value, &mut cx, vec![buffer]).unwrap();
+    let value = store.try_into_js(&mut cx).unwrap();
+    cx.register_global_property(
+        js_string!("restored"),
+        value,
+        boa_engine::property::Attribute::all(),
+    )
+    .unwrap();
+    assert!(
+        cx.eval(Source::from_bytes("restored.typed.length===0"))
+            .unwrap()
+            .to_boolean()
+    );
+    assert!(cx.eval(Source::from_bytes("(()=>{try{restored.view.byteLength;return false}catch(e){return e instanceof TypeError}})()")).unwrap().to_boolean());
+    assert!(cx.eval(Source::from_bytes("restored.typed.buffer.resize(8);restored.typed.byteOffset===4 && restored.typed.length===4 && restored.view.byteOffset===4 && restored.view.byteLength===4")).unwrap().to_boolean());
+}

@@ -50,6 +50,75 @@ impl From<JsObject<DataView>> for JsDataView {
 }
 
 impl JsDataView {
+    /// Whether this view tracks the resizable backing buffer's length.
+    #[must_use]
+    pub fn is_length_tracking(&self) -> bool {
+        self.inner.borrow().data().byte_length.is_none()
+    }
+
+    /// Restore serialized view slots, including a view whose resizable buffer
+    /// shrank during serialization. Bounds are checked against its maximum size.
+    ///
+    /// # Errors
+    /// Rejects invalid buffer brands, arithmetic overflow or impossible ranges.
+    pub fn from_serialized_view(
+        buffer: JsObject,
+        offset: u64,
+        length: Option<u64>,
+        context: &mut Context,
+    ) -> JsResult<Self> {
+        if let Ok(backing) = buffer
+            .clone()
+            .downcast::<crate::builtins::array_buffer::ArrayBuffer>()
+        {
+            let maximum = {
+                let backing = backing.borrow();
+                if backing.data().data().is_none() {
+                    return Err(JsNativeError::typ()
+                        .with_message("Serialized buffer is detached")
+                        .into());
+                }
+                backing.data().max_byte_length()
+            };
+            if let Some(maximum) = maximum {
+                if offset
+                    .checked_add(length.unwrap_or(0))
+                    .is_none_or(|end| end > maximum)
+                {
+                    return Err(JsNativeError::range()
+                        .with_message("Invalid serialized DataView range")
+                        .into());
+                }
+                let prototype = context.intrinsics().constructors().data_view().prototype();
+                let inner = JsObject::new(
+                    context.root_shape(),
+                    prototype,
+                    DataView {
+                        viewed_array_buffer: BufferObject::Buffer(backing),
+                        byte_offset: offset,
+                        byte_length: length,
+                    },
+                );
+                return Ok(Self { inner });
+            }
+        }
+        let constructor = context
+            .intrinsics()
+            .constructors()
+            .data_view()
+            .constructor();
+        let object = constructor.construct(
+            &[
+                buffer.into(),
+                offset.into(),
+                length.map_or_else(JsValue::undefined, Into::into),
+            ],
+            None,
+            context,
+        )?;
+        Self::from_object(object)
+    }
+
     /// Create a new `JsDataView` object from an existing `JsArrayBuffer`.
     pub fn from_js_array_buffer(
         buffer: JsArrayBuffer,

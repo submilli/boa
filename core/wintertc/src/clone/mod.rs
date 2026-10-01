@@ -7,10 +7,45 @@ use boa_engine::realm::Realm;
 use boa_engine::value::TryFromJs;
 use boa_engine::{Context, JsResult, JsValue, boa_module};
 
-/// Options used by `structuredClone`. This is currently unused.
-#[derive(Debug, Clone, TryFromJs)]
+/// Bounded Web IDL options for `structuredClone`.
+#[derive(Debug, Clone)]
 pub struct StructuredCloneOptions {
     transfer: Option<Vec<JsValue>>,
+}
+
+impl TryFromJs for StructuredCloneOptions {
+    fn try_from_js(value: &JsValue, context: &mut Context) -> JsResult<Self> {
+        if value.is_null_or_undefined() {
+            return Ok(Self { transfer: None });
+        }
+        let object = value.as_object().ok_or_else(
+            || boa_engine::js_error!(TypeError: "Clone options must be a dictionary"),
+        )?;
+        let list = object.get(boa_engine::js_string!("transfer"), context)?;
+        if list.is_undefined() {
+            return Ok(Self { transfer: None });
+        }
+        let mut iterator =
+            list.get_iterator(boa_engine::builtins::iterable::IteratorHint::Sync, context)?;
+        let mut transfer = Vec::new();
+        while let Some(value) = iterator.step_value(context)? {
+            if transfer.len() >= 1024 {
+                iterator.close(Err(boa_engine::js_error!(RangeError: "Structured clone transfer limit exceeded")), context)?;
+                unreachable!("IteratorClose preserves an abrupt completion");
+            }
+            if !value.is_object() {
+                iterator.close(
+                    Err(boa_engine::js_error!(TypeError: "Transfer entries must be objects")),
+                    context,
+                )?;
+                unreachable!("IteratorClose preserves an abrupt completion");
+            }
+            transfer.push(value);
+        }
+        Ok(Self {
+            transfer: Some(transfer),
+        })
+    }
 }
 
 /// JavaScript module containing the `structuredClone` types and functions.

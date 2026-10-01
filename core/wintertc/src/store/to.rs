@@ -5,7 +5,7 @@ use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::object::builtins::{
     JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsSharedArrayBuffer,
 };
-use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsValue, js_error};
+use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsValue};
 use rustc_hash::FxHashMap;
 
 pub(super) struct ReverseSeenMap {
@@ -23,7 +23,7 @@ impl ReverseSeenMap {
     fn get(&self, object: NodeId) -> Option<JsObject> {
         self.objects.get(&object).cloned()
     }
-    fn insert(&mut self, original: NodeId, object: JsObject) {
+    pub(super) fn insert(&mut self, original: NodeId, object: JsObject) {
         self.objects.insert(original, object);
     }
 }
@@ -65,10 +65,16 @@ fn try_items_into_js_array(
 fn try_into_js_array_buffer(
     store: NodeId,
     data: &[u8],
+    max_byte_length: Option<u64>,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let buffer = JsArrayBuffer::from_byte_block(AlignedVec::from_slice(0, data), context)?;
+    let buffer = if let Some(max) = max_byte_length {
+        buffer.with_max_byte_length(max)
+    } else {
+        buffer
+    };
     let obj = JsObject::from(buffer);
     seen.insert(store, obj.clone());
     Ok(JsValue::from(obj))
@@ -91,7 +97,7 @@ fn try_into_js_typed_array(
     kind: TypedArrayKind,
     buffer: NodeId,
     byte_offset: usize,
-    length: usize,
+    length: Option<usize>,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -99,7 +105,6 @@ fn try_into_js_typed_array(
     let Some(buffer) = buffer.as_object() else {
         return Err(unsupported_type());
     };
-    let buffer = JsArrayBuffer::from_object(buffer)?;
     let array = boa_engine::object::builtins::js_typed_array_view_from_kind(
         kind,
         buffer,
@@ -174,16 +179,16 @@ fn try_into_regexp(
 fn try_into_data_view(
     store: NodeId,
     buffer: NodeId,
-    byte_length: u64,
+    byte_length: Option<u64>,
     byte_offset: u64,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let buffer = try_value_into_js(buffer, seen, context)?;
-    let data_view = JsDataView::from_js_array_buffer(
-        JsArrayBuffer::from_object(buffer.as_object().ok_or_else(unsupported_type)?)?,
-        Some(byte_offset),
-        Some(byte_length),
+    let data_view = JsDataView::from_serialized_view(
+        buffer.as_object().ok_or_else(unsupported_type)?,
+        byte_offset,
+        byte_length,
         context,
     )?;
 
@@ -206,6 +211,11 @@ pub(super) fn try_value_into_js(
         ValueStoreInner::Empty => {
             unreachable!("ValueStoreInner::Empty should not exist after storage.");
         }
+        ValueStoreInner::Boxed(value) => {
+            let object = try_value_into_js(*value, seen, context)?.to_object(context)?;
+            seen.insert(store, object.clone());
+            Ok(object.into())
+        }
         ValueStoreInner::Null => Ok(JsValue::null()),
         ValueStoreInner::Undefined => Ok(JsValue::undefined()),
         ValueStoreInner::Boolean(b) => Ok(JsValue::from(*b)),
@@ -219,11 +229,27 @@ pub(super) fn try_value_into_js(
             try_items_into_js_array(store, *length, fields, seen, context)
         }
         ValueStoreInner::Date(msec) => try_into_js_date(store, *msec, seen, context),
-        ValueStoreInner::Error { .. } => Err(js_error!("Not yet implemented.")),
+        ValueStoreInner::Error {
+            kind,
+            message,
+            stack,
+            cause,
+        } => super::errors::deserialize(
+            store,
+            *kind,
+            message.as_ref(),
+            stack.as_ref(),
+            *cause,
+            seen,
+            context,
+        ),
         ValueStoreInner::RegExp { source, flags } => {
             try_into_regexp(store, source, flags, seen, context)
         }
-        ValueStoreInner::ArrayBuffer(data) => try_into_js_array_buffer(store, data, seen, context),
+        ValueStoreInner::ArrayBuffer {
+            data,
+            max_byte_length,
+        } => try_into_js_array_buffer(store, data, *max_byte_length, seen, context),
         ValueStoreInner::SharedArrayBuffer(inner) => {
             Ok(try_into_js_shared_array_buffer(store, inner, seen, context))
         }

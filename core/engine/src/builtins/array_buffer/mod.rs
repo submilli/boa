@@ -267,6 +267,24 @@ impl ArrayBuffer {
         self.data.as_deref()
     }
 
+    /// Bytes retained by the backing allocation, including unused capacity.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> usize {
+        self.data.as_ref().map_or(0, AlignedVec::capacity)
+    }
+
+    /// Internal resizable-buffer capacity, without consulting JS properties.
+    #[must_use]
+    pub fn max_byte_length(&self) -> Option<u64> {
+        self.max_byte_len
+    }
+
+    /// Whether structured transfer may detach this buffer without a key.
+    #[must_use]
+    pub fn is_transferable(&self) -> bool {
+        self.data.is_some() && self.detach_key.is_undefined()
+    }
+
     /// Resizes the buffer to the new size, clamped to the maximum byte length if present.
     pub fn resize(&mut self, new_byte_length: u64) -> JsResult<()> {
         let Some(max_byte_len) = self.max_byte_len else {

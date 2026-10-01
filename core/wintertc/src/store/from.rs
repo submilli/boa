@@ -9,7 +9,7 @@ use boa_engine::object::builtins::{
 };
 use boa_engine::property::PropertyKey;
 use boa_engine::{Context, JsError, JsObject, JsResult, JsString, JsValue, JsVariant, js_error};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 /// A Map of seen objects when walking through the value. We use the address
 /// of the inner object as it is unique per JavaScript value.
@@ -44,13 +44,50 @@ impl SeenMap {
                 .sum::<usize>()
             + 64
     }
-    fn get(&self, object: &JsObject) -> Option<NodeId> {
+    pub(super) fn reserve_transfers(&mut self, objects: &[JsObject]) -> JsResult<()> {
+        for object in objects {
+            let node = self.push(ValueStoreInner::Empty)?;
+            self.insert(object, node);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_transfers(&mut self, objects: &[JsObject]) -> JsResult<()> {
+        // All validation and budget checks precede the first detach. No callback
+        // can run between validation and detachment.
+        for object in objects {
+            let buffer = object
+                .downcast_ref::<ArrayBuffer>()
+                .ok_or_else(|| self.unsupported())?;
+            if !buffer.is_transferable() {
+                return Err(self.unsupported());
+            }
+            self.charge(buffer.allocated_bytes())?;
+        }
+        for object in objects {
+            let mut buffer = object
+                .downcast_mut::<ArrayBuffer>()
+                .ok_or_else(|| self.unsupported())?;
+            let max_byte_length = buffer.max_byte_length();
+            let data = buffer
+                .detach(&JsValue::undefined())?
+                .ok_or_else(|| self.unsupported())?;
+            let node = self.get(object).expect("transfer identities were reserved");
+            self.nodes[node] = ValueStoreInner::ArrayBuffer {
+                data,
+                max_byte_length,
+            };
+        }
+        Ok(())
+    }
+
+    pub(super) fn get(&self, object: &JsObject) -> Option<NodeId> {
         self.objects.get(object).copied()
     }
-    fn insert(&mut self, original: &JsObject, object: NodeId) {
+    pub(super) fn insert(&mut self, original: &JsObject, object: NodeId) {
         self.objects.insert(original.clone(), object);
     }
-    fn charge(&mut self, bytes: usize) -> JsResult<()> {
+    pub(super) fn charge(&mut self, bytes: usize) -> JsResult<()> {
         self.bytes = self
             .bytes
             .checked_add(bytes)
@@ -58,7 +95,7 @@ impl SeenMap {
             .ok_or_else(|| js_error!(RangeError: "Structured clone byte limit exceeded"))?;
         Ok(())
     }
-    fn push(&mut self, value: ValueStoreInner) -> JsResult<NodeId> {
+    pub(super) fn push(&mut self, value: ValueStoreInner) -> JsResult<NodeId> {
         if self.nodes.len() >= 65536 {
             return Err(js_error!(RangeError: "Structured clone node limit exceeded"));
         }
@@ -71,13 +108,14 @@ impl SeenMap {
 /// Return true if an object is transferable.
 pub(super) fn is_transferable(object: &JsObject) -> bool {
     // The only transferable object supported for now is ArrayBuffer.
-    object.downcast_mut::<ArrayBuffer>().is_some()
+    object
+        .downcast_ref::<ArrayBuffer>()
+        .is_some_and(|buffer| buffer.is_transferable())
 }
 
 /// The core logic of the [`super::JsValueStore::try_from_js`] function.
 fn try_from_js_object(
     value: &JsObject,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
@@ -86,44 +124,11 @@ fn try_from_js_object(
         return Ok(o2);
     }
 
-    // Is it a transferable object?
-    let new_value = if transfer.contains(value) {
-        try_from_js_object_transfer(value, seen, context)?
-    } else {
-        try_from_js_object_clone(value, transfer, seen, context)?
-    };
-
-    Ok(new_value)
-}
-
-/// Transfer an object into a store instead of cloning it. See [mdn].
-///
-/// Only [transferable objects][to] can be transferred. Anything else will return an
-/// error. Since any object t
-///
-/// [mdn]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects
-/// [to]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Transferable_objects#supported_objects
-fn try_from_js_object_transfer(
-    object: &JsObject,
-    seen: &mut SeenMap,
-    _context: &mut Context,
-) -> JsResult<NodeId> {
-    if let Some(mut buffer) = object.downcast_mut::<ArrayBuffer>() {
-        seen.charge(buffer.data().ok_or_else(|| seen.unsupported())?.len())?;
-        let data = buffer.detach(&JsValue::undefined())?;
-        let data = data.ok_or_else(|| seen.unsupported())?;
-
-        let node = seen.push(ValueStoreInner::ArrayBuffer(data))?;
-        seen.insert(object, node);
-        Ok(node)
-    } else {
-        Err(seen.unsupported())
-    }
+    try_from_js_object_clone(value, seen, context)
 }
 
 fn try_from_array_clone(
     array: &JsArray,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
@@ -138,7 +143,7 @@ fn try_from_array_clone(
     if length > 65536 {
         return Err(js_error!(RangeError: "Structured clone array limit exceeded"));
     }
-    let fields = own_fields(&JsObject::from(array.clone()), transfer, seen, context)?;
+    let fields = own_fields(&JsObject::from(array.clone()), seen, context)?;
     seen.nodes[dolly] = ValueStoreInner::Array {
         length: length as u64,
         fields,
@@ -154,7 +159,14 @@ fn try_from_array_buffer_clone(
     let data = buffer.data().ok_or_else(|| seen.unsupported())?;
     seen.charge(data.len())?;
     let data = AlignedVec::from_slice(0, &data);
-    let new_value = seen.push(ValueStoreInner::ArrayBuffer(data))?;
+    let max_byte_length = original
+        .downcast_ref::<ArrayBuffer>()
+        .expect("JsArrayBuffer is branded")
+        .max_byte_length();
+    let new_value = seen.push(ValueStoreInner::ArrayBuffer {
+        data,
+        max_byte_length,
+    })?;
     seen.insert(original, new_value);
 
     Ok(new_value)
@@ -173,35 +185,21 @@ fn try_from_shared_array_buffer(
 fn clone_typed_array(
     original: &JsObject,
     buffer: &JsTypedArray,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
     let backing = buffer.buffer(context)?;
-    let transferred_length = backing
-        .as_object()
-        .filter(|object| transfer.contains(object))
-        .and_then(|object| seen.get(&object))
-        .and_then(|node| match &seen.nodes[node] {
-            ValueStoreInner::ArrayBuffer(data) => Some(data.len()),
-            _ => None,
-        });
-    let (byte_offset, length) = if let Some(bytes) = transferred_length {
-        buffer
-            .shape_for_buffer_length(bytes)
-            .map_err(|_| seen.unsupported())?
-    } else {
-        buffer.validate_view().map_err(|_| seen.unsupported())?;
-        (buffer.byte_offset(context)?, buffer.length(context)?)
-    };
+    buffer.validate_view().map_err(|_| seen.unsupported())?;
+    let (byte_offset, length) = (buffer.byte_offset(context)?, buffer.length(context)?);
+    let buffer_is_tracking = buffer.is_length_tracking();
     let kind = buffer.kind().ok_or_else(|| seen.unsupported())?;
     let buffer = backing;
-    let buffer = try_from_js_value(&buffer, transfer, seen, context)?;
+    let buffer = try_from_js_value(&buffer, seen, context)?;
     let dolly = seen.push(ValueStoreInner::TypedArray {
         kind,
         buffer,
         byte_offset,
-        length,
+        length: (!buffer_is_tracking).then_some(length),
     })?;
     seen.insert(original, dolly);
     Ok(dolly)
@@ -241,7 +239,6 @@ fn clone_regexp(
 fn try_from_map(
     original: &JsObject,
     map: &JsMap,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
@@ -259,8 +256,8 @@ fn try_from_map(
         Ok(())
     })?;
     for (k, v) in entries {
-        let key = try_from_js_value(&k, transfer, seen, context)?;
-        let value = try_from_js_value(&v, transfer, seen, context)?;
+        let key = try_from_js_value(&k, seen, context)?;
+        let value = try_from_js_value(&v, seen, context)?;
         new_map.push((key, value));
     }
 
@@ -272,7 +269,6 @@ fn try_from_map(
 fn try_from_set(
     original: &JsObject,
     set: &JsSet,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
@@ -290,7 +286,7 @@ fn try_from_set(
         Ok(())
     })?;
     for v in entries {
-        let value = try_from_js_value(&v, transfer, seen, context)?;
+        let value = try_from_js_value(&v, seen, context)?;
         new_set.push(value);
     }
 
@@ -301,20 +297,36 @@ fn try_from_set(
 
 fn try_from_js_object_clone(
     object: &JsObject,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
+    let primitive = if let Some(value) = object.downcast_ref::<bool>() {
+        Some(JsValue::from(*value))
+    } else if let Some(value) = object.downcast_ref::<f64>() {
+        Some(JsValue::from(*value))
+    } else if let Some(value) = object.downcast_ref::<JsString>() {
+        Some(JsValue::from(value.clone()))
+    } else {
+        object
+            .downcast_ref::<boa_engine::JsBigInt>()
+            .map(|value| JsValue::from(value.clone()))
+    };
+    if let Some(primitive) = primitive {
+        let value = try_from_js_value(&primitive, seen, context)?;
+        let node = seen.push(ValueStoreInner::Boxed(value))?;
+        seen.insert(object, node);
+        return Ok(node);
+    }
     // If this is a special type of object, apply some special rules to it.
     // Described in
     // https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm#supported_types
 
     if let Ok(array) = JsArray::from_object(object.clone()) {
-        return try_from_array_clone(&array, transfer, seen, context);
+        return try_from_array_clone(&array, seen, context);
     } else if let Ok(map) = JsMap::from_object(object.clone()) {
-        return try_from_map(object, &map, transfer, seen, context);
+        return try_from_map(object, &map, seen, context);
     } else if let Ok(set) = JsSet::from_object(object.clone()) {
-        return try_from_set(object, &set, transfer, seen, context);
+        return try_from_set(object, &set, seen, context);
     } else if let Ok(ref buffer) = JsArrayBuffer::from_object(object.clone()) {
         return try_from_array_buffer_clone(object, buffer, seen);
     } else if let Ok(ref buffer) = JsSharedArrayBuffer::from_object(object.clone()) {
@@ -323,21 +335,21 @@ fn try_from_js_object_clone(
         }
         return try_from_shared_array_buffer(object, buffer, seen);
     } else if let Ok(ref typed_array) = JsTypedArray::from_object(object.clone()) {
-        return clone_typed_array(object, typed_array, transfer, seen, context);
+        return clone_typed_array(object, typed_array, seen, context);
     } else if let Ok(ref date) = JsDate::from_object(object.clone()) {
         return clone_date(object, date, seen, context);
-    } else if let Ok(_error) = object.clone().downcast::<Error>() {
-        return Err(seen.unsupported());
+    } else if object.is::<Error>() {
+        return super::errors::serialize(object, seen, context);
     } else if let Ok(ref regexp) = JsRegExp::from_object(object.clone()) {
         return clone_regexp(object, regexp, seen, context);
     } else if let Ok(view) = JsDataView::from_object(object.clone()) {
         let byte_length = view.byte_length(context).map_err(|_| seen.unsupported())?;
         let byte_offset = view.byte_offset(context).map_err(|_| seen.unsupported())?;
         let buffer = view.buffer(context)?;
-        let buffer = try_from_js_value(&buffer, transfer, seen, context)?;
+        let buffer = try_from_js_value(&buffer, seen, context)?;
         let node = seen.push(ValueStoreInner::DataView {
             buffer,
-            byte_length,
+            byte_length: (!view.is_length_tracking()).then_some(byte_length),
             byte_offset,
         })?;
         seen.insert(object, node);
@@ -347,7 +359,7 @@ fn try_from_js_object_clone(
         return Err(seen.unsupported());
     }
 
-    if seen.storage && !object.is_ordinary() {
+    if !object.is_ordinary() {
         return Err(seen.unsupported());
     }
 
@@ -356,14 +368,13 @@ fn try_from_js_object_clone(
     let dolly = seen.push(ValueStoreInner::Empty)?;
     seen.insert(object, dolly);
 
-    let fields = own_fields(object, transfer, seen, context)?;
+    let fields = own_fields(object, seen, context)?;
     seen.nodes[dolly] = ValueStoreInner::Object(fields);
     Ok(dolly)
 }
 
 fn own_fields(
     object: &JsObject,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<Vec<(StringStore, NodeId)>> {
@@ -398,7 +409,7 @@ fn own_fields(
             }
         };
 
-        let v = try_from_js_value(&value, transfer, seen, context)?;
+        let v = try_from_js_value(&value, seen, context)?;
         seen.charge(size_of::<(StringStore, NodeId)>())?;
         fields.push((key, v));
     }
@@ -408,7 +419,6 @@ fn own_fields(
 
 pub(super) fn try_from_js_value(
     value: &JsValue,
-    transfer: &FxHashSet<JsObject>,
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
@@ -429,7 +439,7 @@ pub(super) fn try_from_js_value(
             seen.charge(bytes)?;
             seen.push(ValueStoreInner::BigInt(b.as_inner().clone()))
         }
-        JsVariant::Object(ref o) => try_from_js_object(o, transfer, seen, context),
+        JsVariant::Object(ref o) => try_from_js_object(o, seen, context),
 
         // Symbols cannot be transferred/cloned.
         JsVariant::Symbol(_) => Err(seen.unsupported()),
