@@ -22,6 +22,24 @@ fn unsupported_transfer() -> JsError {
     js_error!(TypeError: "Found an invalid value in transferList")
 }
 
+/// Native marker for storage serialization rejection. It contains no page data.
+#[derive(Debug, boa_engine::Trace, boa_engine::Finalize, boa_engine::JsData)]
+pub struct StorageDataCloneError;
+
+impl StorageDataCloneError {
+    /// Distinguish an engine rejection from an exception thrown by a getter.
+    #[must_use]
+    pub fn is_error(error: &JsError) -> bool {
+        error
+            .as_opaque()
+            .and_then(JsValue::as_object)
+            .is_some_and(|object| object.is::<Self>())
+    }
+    fn error() -> JsError {
+        JsError::from_opaque(boa_engine::JsObject::from_proto_and_data(None, Self).into())
+    }
+}
+
 /// A type to help store [`JsString`]. Because [`JsString`] relies on [`std::rc::Rc`],
 /// it cannot be `Send`, which is a necessary contract for the Store. The [`StringStore`]
 /// can be transformed from and into `JsString`, but owns its data. It is _not_ copy-on-
@@ -89,7 +107,10 @@ enum ValueStoreInner {
     Set(Vec<NodeId>),
 
     /// An `Array` object in JavaScript.
-    Array(Vec<Option<NodeId>>),
+    Array {
+        length: u64,
+        fields: Vec<(StringStore, NodeId)>,
+    },
 
     /// A `Date` object in JavaScript. Although this can be marshaled, it uses
     /// the system's datetime library to be reconstructed and may diverge.
@@ -108,7 +129,10 @@ enum ValueStoreInner {
     /// Regular expression. We store the expression and its flags. Everything else
     /// is reset. These are extracted as `String`, so we don't need to use the
     /// [`StringStore`] type.
-    RegExp { source: String, flags: String },
+    RegExp {
+        source: StringStore,
+        flags: StringStore,
+    },
 
     /// Array Buffer.
     ArrayBuffer(AlignedVec<u8>),
@@ -117,7 +141,6 @@ enum ValueStoreInner {
     SharedArrayBuffer(SharedArrayBuffer),
 
     /// Dataview.
-    #[expect(unused)]
     DataView {
         buffer: NodeId,
         byte_length: u64,
@@ -128,7 +151,53 @@ enum ValueStoreInner {
     TypedArray {
         kind: TypedArrayKind,
         buffer: NodeId,
+        byte_offset: usize,
+        length: usize,
     },
+}
+
+impl ValueStoreInner {
+    fn retained_payload_bytes(&self) -> usize {
+        match self {
+            Self::String(value) => value.0.capacity() * 2,
+            Self::BigInt(value) => {
+                usize::try_from(value.bits().div_ceil(8))
+                    .expect("serialized BigInt passed the byte limit")
+                    * 2
+                    + 32
+            }
+            Self::Object(fields) | Self::Array { fields, .. } => {
+                fields.capacity() * size_of::<(StringStore, NodeId)>()
+                    + fields
+                        .iter()
+                        .map(|(key, _)| key.0.capacity() * 2)
+                        .sum::<usize>()
+            }
+            Self::Map(entries) => entries.capacity() * size_of::<(NodeId, NodeId)>(),
+            Self::Set(entries) => entries.capacity() * size_of::<NodeId>(),
+            Self::RegExp { source, flags } => (source.0.capacity() + flags.0.capacity()) * 2,
+            Self::ArrayBuffer(data) => data.capacity(),
+            Self::Error {
+                name,
+                message,
+                stack,
+                cause,
+                ..
+            } => [name, message, stack, cause]
+                .iter()
+                .map(|s| s.0.capacity() * 2)
+                .sum(),
+            Self::Empty
+            | Self::Null
+            | Self::Undefined
+            | Self::Boolean(_)
+            | Self::Float(_)
+            | Self::Date(_)
+            | Self::SharedArrayBuffer(_)
+            | Self::DataView { .. }
+            | Self::TypedArray { .. } => 0,
+        }
+    }
 }
 
 /// A [`JsValue`]-like structure that can rebuild its value given any [`Context`].
@@ -150,6 +219,7 @@ enum ValueStoreInner {
 pub struct JsValueStore {
     graph: Arc<Vec<ValueStoreInner>>,
     root: NodeId,
+    retained_bytes: usize,
 }
 
 type NodeId = usize;
@@ -174,7 +244,31 @@ impl JsValueStore {
         context: &mut Context,
         transfer: Vec<JsValue>,
     ) -> JsResult<Self> {
-        let mut seen = from::SeenMap::default();
+        Self::serialize(value, context, transfer, false)
+    }
+
+    /// Serialize session history state without shared memory or transfers.
+    ///
+    /// # Errors
+    /// Returns a [`StorageDataCloneError`] marker for unsupported values, the
+    /// original exception from a getter, or a range error at a resource limit.
+    pub fn for_storage(value: &JsValue, context: &mut Context) -> JsResult<Self> {
+        Self::serialize(value, context, Vec::new(), true)
+    }
+
+    /// Conservative retained graph and payload size for aggregate admission.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn serialize(
+        value: &JsValue,
+        context: &mut Context,
+        transfer: Vec<JsValue>,
+        storage: bool,
+    ) -> JsResult<Self> {
+        let mut seen = from::SeenMap::new(storage);
         // Verify the validity of the transfer list and make it a set.
         let transfer = transfer
             .into_iter()
@@ -187,6 +281,7 @@ impl JsValueStore {
         let v = from::try_from_js_value(value, &transfer, &mut seen, context)?;
         Ok(Self {
             root: v,
+            retained_bytes: seen.retained_bytes(),
             graph: Arc::new(seen.nodes),
         })
     }

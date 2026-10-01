@@ -4,9 +4,8 @@ use boa_engine::builtins::array_buffer::{AlignedVec, SharedArrayBuffer};
 use boa_engine::builtins::typed_array::TypedArrayKind;
 use boa_engine::object::builtins::{
     JsArray, JsArrayBuffer, JsDataView, JsDate, JsMap, JsRegExp, JsSet, JsSharedArrayBuffer,
-    js_typed_array_from_kind,
 };
-use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_error};
+use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsValue, js_error};
 use rustc_hash::FxHashMap;
 
 pub(super) struct ReverseSeenMap {
@@ -41,29 +40,26 @@ fn try_fields_into_js_object(
     for (k, v) in fields {
         let k = k.to_js_string();
         let value = try_value_into_js(*v, seen, context)?;
-        dolly.set(k, value, true, context)?;
+        dolly.create_data_property_or_throw(k, value, context)?;
     }
     Ok(JsValue::from(dolly))
 }
 
 fn try_items_into_js_array(
     store: NodeId,
-    items: &[Option<NodeId>],
+    length: u64,
+    fields: &[(StringStore, NodeId)],
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let dolly = JsArray::new(context)?;
     seen.insert(store, dolly.clone().into());
-
-    for (k, v) in items
-        .iter()
-        .enumerate()
-        .filter_map(|(k, v)| v.as_ref().map(|v| (k, v)))
-    {
-        let value = try_value_into_js(*v, seen, context)?;
-        dolly.set(k, value, true, context)?;
+    dolly.set(boa_engine::js_string!("length"), length, true, context)?;
+    for (key, node) in fields {
+        let value = try_value_into_js(*node, seen, context)?;
+        dolly.create_data_property_or_throw(key.to_js_string(), value, context)?;
     }
-    Ok(JsValue::from(dolly))
+    Ok(dolly.into())
 }
 
 fn try_into_js_array_buffer(
@@ -94,6 +90,8 @@ fn try_into_js_typed_array(
     store: NodeId,
     kind: TypedArrayKind,
     buffer: NodeId,
+    byte_offset: usize,
+    length: usize,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
@@ -102,7 +100,13 @@ fn try_into_js_typed_array(
         return Err(unsupported_type());
     };
     let buffer = JsArrayBuffer::from_object(buffer)?;
-    let array = js_typed_array_from_kind(kind, buffer, context)?;
+    let array = boa_engine::object::builtins::js_typed_array_view_from_kind(
+        kind,
+        buffer,
+        byte_offset,
+        length,
+        context,
+    )?;
     if let Some(o) = array.as_object() {
         seen.insert(store, o);
     }
@@ -157,12 +161,12 @@ fn try_into_js_date(
 
 fn try_into_regexp(
     store: NodeId,
-    source: &str,
-    flags: &str,
+    source: &StringStore,
+    flags: &StringStore,
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let re = JsRegExp::new(JsString::from(source), JsString::from(flags), context)?;
+    let re = JsRegExp::new(source.to_js_string(), flags.to_js_string(), context)?;
     seen.insert(store, re.clone().into());
     Ok(JsValue::from(re))
 }
@@ -211,7 +215,9 @@ pub(super) fn try_value_into_js(
         ValueStoreInner::Object(fields) => try_fields_into_js_object(store, fields, seen, context),
         ValueStoreInner::Map(key_values) => try_into_js_map(store, key_values, seen, context),
         ValueStoreInner::Set(values) => try_into_js_set(store, values, seen, context),
-        ValueStoreInner::Array(items) => try_items_into_js_array(store, items, seen, context),
+        ValueStoreInner::Array { length, fields } => {
+            try_items_into_js_array(store, *length, fields, seen, context)
+        }
         ValueStoreInner::Date(msec) => try_into_js_date(store, *msec, seen, context),
         ValueStoreInner::Error { .. } => Err(js_error!("Not yet implemented.")),
         ValueStoreInner::RegExp { source, flags } => {
@@ -226,8 +232,11 @@ pub(super) fn try_value_into_js(
             byte_length,
             byte_offset,
         } => try_into_data_view(store, *buffer, *byte_length, *byte_offset, seen, context),
-        ValueStoreInner::TypedArray { kind, buffer } => {
-            try_into_js_typed_array(store, *kind, *buffer, seen, context)
-        }
+        ValueStoreInner::TypedArray {
+            kind,
+            buffer,
+            byte_offset,
+            length,
+        } => try_into_js_typed_array(store, *kind, *buffer, *byte_offset, *length, seen, context),
     }
 }

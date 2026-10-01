@@ -1,6 +1,6 @@
 //! A Rust API wrapper for Boa's `RegExp` Builtin ECMAScript Object
 use crate::{
-    Context, JsExpect, JsNativeError, JsResult, JsValue,
+    Context, JsExpect, JsNativeError, JsResult, JsString, JsValue,
     builtins::RegExp,
     error::PanicError,
     object::{JsArray, JsObject},
@@ -42,6 +42,19 @@ pub struct JsRegExp {
 }
 
 impl JsRegExp {
+    /// Internal pattern and flags, without invoking overridable accessors.
+    #[must_use]
+    pub fn pattern_and_flags(&self) -> (JsString, JsString) {
+        let value = self
+            .inner
+            .downcast_ref::<RegExp>()
+            .expect("JsRegExp is branded");
+        (
+            value.original_source().clone(),
+            value.original_flags().clone(),
+        )
+    }
+
     /// Create a new `JsRegExp` object
     /// ```
     /// # use boa_engine::{

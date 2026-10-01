@@ -18,9 +18,32 @@ pub(super) struct SeenMap {
     objects: FxHashMap<JsObject, NodeId>,
     pub(super) nodes: Vec<ValueStoreInner>,
     bytes: usize,
+    storage: bool,
 }
 
 impl SeenMap {
+    fn unsupported(&self) -> JsError {
+        if self.storage {
+            super::StorageDataCloneError::error()
+        } else {
+            unsupported_type()
+        }
+    }
+    pub(super) fn new(storage: bool) -> Self {
+        Self {
+            storage,
+            ..Self::default()
+        }
+    }
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.nodes.capacity() * size_of::<ValueStoreInner>()
+            + self
+                .nodes
+                .iter()
+                .map(ValueStoreInner::retained_payload_bytes)
+                .sum::<usize>()
+            + 64
+    }
     fn get(&self, object: &JsObject) -> Option<NodeId> {
         self.objects.get(object).copied()
     }
@@ -39,11 +62,6 @@ impl SeenMap {
         if self.nodes.len() >= 65536 {
             return Err(js_error!(RangeError: "Structured clone node limit exceeded"));
         }
-        let bytes = match &value {
-            ValueStoreInner::RegExp { source, flags } => source.len().saturating_add(flags.len()),
-            _ => 0,
-        };
-        self.charge(bytes)?;
         let id = self.nodes.len();
         self.nodes.push(value);
         Ok(id)
@@ -91,15 +109,15 @@ fn try_from_js_object_transfer(
     _context: &mut Context,
 ) -> JsResult<NodeId> {
     if let Some(mut buffer) = object.downcast_mut::<ArrayBuffer>() {
-        seen.charge(buffer.data().ok_or_else(unsupported_type)?.len())?;
+        seen.charge(buffer.data().ok_or_else(|| seen.unsupported())?.len())?;
         let data = buffer.detach(&JsValue::undefined())?;
-        let data = data.ok_or_else(unsupported_type)?;
+        let data = data.ok_or_else(|| seen.unsupported())?;
 
         let node = seen.push(ValueStoreInner::ArrayBuffer(data))?;
         seen.insert(object, node);
         Ok(node)
     } else {
-        Err(unsupported_type())
+        Err(seen.unsupported())
     }
 }
 
@@ -120,23 +138,11 @@ fn try_from_array_clone(
     if length > 65536 {
         return Err(js_error!(RangeError: "Structured clone array limit exceeded"));
     }
-    seen.charge(length.saturating_mul(size_of::<Option<NodeId>>()))?;
-    let mut inner = Vec::with_capacity(length);
-    for i in 0..length {
-        let v = array
-            .borrow()
-            .properties()
-            .get(&i.into())
-            .and_then(|x| x.value().cloned());
-        if let Some(v) = v {
-            let v = try_from_js_value(&v, transfer, seen, context)?;
-            inner.push(Some(v));
-        } else {
-            inner.push(None);
-        }
-    }
-
-    seen.nodes[dolly] = ValueStoreInner::Array(inner);
+    let fields = own_fields(&JsObject::from(array.clone()), transfer, seen, context)?;
+    seen.nodes[dolly] = ValueStoreInner::Array {
+        length: length as u64,
+        fields,
+    };
     Ok(dolly)
 }
 
@@ -145,7 +151,7 @@ fn try_from_array_buffer_clone(
     buffer: &JsArrayBuffer,
     seen: &mut SeenMap,
 ) -> JsResult<NodeId> {
-    let data = buffer.data().ok_or_else(unsupported_type)?;
+    let data = buffer.data().ok_or_else(|| seen.unsupported())?;
     seen.charge(data.len())?;
     let data = AlignedVec::from_slice(0, &data);
     let new_value = seen.push(ValueStoreInner::ArrayBuffer(data))?;
@@ -171,10 +177,32 @@ fn clone_typed_array(
     seen: &mut SeenMap,
     context: &mut Context,
 ) -> JsResult<NodeId> {
-    let kind = buffer.kind().ok_or_else(unsupported_type)?;
-    let buffer = buffer.buffer(context)?;
+    let backing = buffer.buffer(context)?;
+    let transferred_length = backing
+        .as_object()
+        .filter(|object| transfer.contains(object))
+        .and_then(|object| seen.get(&object))
+        .and_then(|node| match &seen.nodes[node] {
+            ValueStoreInner::ArrayBuffer(data) => Some(data.len()),
+            _ => None,
+        });
+    let (byte_offset, length) = if let Some(bytes) = transferred_length {
+        buffer
+            .shape_for_buffer_length(bytes)
+            .map_err(|_| seen.unsupported())?
+    } else {
+        buffer.validate_view().map_err(|_| seen.unsupported())?;
+        (buffer.byte_offset(context)?, buffer.length(context)?)
+    };
+    let kind = buffer.kind().ok_or_else(|| seen.unsupported())?;
+    let buffer = backing;
     let buffer = try_from_js_value(&buffer, transfer, seen, context)?;
-    let dolly = seen.push(ValueStoreInner::TypedArray { kind, buffer })?;
+    let dolly = seen.push(ValueStoreInner::TypedArray {
+        kind,
+        buffer,
+        byte_offset,
+        length,
+    })?;
     seen.insert(original, dolly);
     Ok(dolly)
 }
@@ -188,7 +216,7 @@ fn clone_date(
     let ms_since_epoch = date
         .get_time(context)?
         .as_number()
-        .ok_or_else(unsupported_type)?;
+        .ok_or_else(|| seen.unsupported())?;
 
     let stored = seen.push(ValueStoreInner::Date(ms_since_epoch))?;
     seen.insert(original, stored);
@@ -199,10 +227,11 @@ fn clone_regexp(
     original: &JsObject,
     regexp: &JsRegExp,
     seen: &mut SeenMap,
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<NodeId> {
-    let source = regexp.source(context)?;
-    let flags = regexp.flags(context)?;
+    let (source, flags) = regexp.pattern_and_flags();
+    seen.charge(source.len().saturating_add(flags.len()).saturating_mul(2))?;
+    let (source, flags) = (source.into(), flags.into());
 
     let stored = seen.push(ValueStoreInner::RegExp { source, flags })?;
     seen.insert(original, stored);
@@ -220,14 +249,20 @@ fn try_from_map(
     let store = seen.push(ValueStoreInner::Empty)?;
     seen.insert(original, store);
 
-    map.for_each_native(|k, v| {
-        let key = try_from_js_value(&k, transfer, seen, context)?;
-        let value = try_from_js_value(&v, transfer, seen, context)?;
+    let mut entries = Vec::new();
+    map.for_each_native(|key, value| {
+        if entries.len() >= 65536 {
+            return Err(js_error!(RangeError: "Structured clone map limit exceeded"));
+        }
         seen.charge(2 * size_of::<NodeId>())?;
-        new_map.push((key, value));
-
+        entries.push((key, value));
         Ok(())
     })?;
+    for (k, v) in entries {
+        let key = try_from_js_value(&k, transfer, seen, context)?;
+        let value = try_from_js_value(&v, transfer, seen, context)?;
+        new_map.push((key, value));
+    }
 
     seen.nodes[store] = ValueStoreInner::Map(new_map);
 
@@ -245,13 +280,19 @@ fn try_from_set(
     let store = seen.push(ValueStoreInner::Empty)?;
     seen.insert(original, store);
 
-    set.for_each_native(|v| {
-        let value = try_from_js_value(&v, transfer, seen, context)?;
+    let mut entries = Vec::new();
+    set.for_each_native(|value| {
+        if entries.len() >= 65536 {
+            return Err(js_error!(RangeError: "Structured clone set limit exceeded"));
+        }
         seen.charge(size_of::<NodeId>())?;
-        new_set.push(value);
-
+        entries.push(value);
         Ok(())
     })?;
+    for v in entries {
+        let value = try_from_js_value(&v, transfer, seen, context)?;
+        new_set.push(value);
+    }
 
     seen.nodes[store] = ValueStoreInner::Set(new_set);
 
@@ -277,20 +318,37 @@ fn try_from_js_object_clone(
     } else if let Ok(ref buffer) = JsArrayBuffer::from_object(object.clone()) {
         return try_from_array_buffer_clone(object, buffer, seen);
     } else if let Ok(ref buffer) = JsSharedArrayBuffer::from_object(object.clone()) {
+        if seen.storage {
+            return Err(seen.unsupported());
+        }
         return try_from_shared_array_buffer(object, buffer, seen);
     } else if let Ok(ref typed_array) = JsTypedArray::from_object(object.clone()) {
         return clone_typed_array(object, typed_array, transfer, seen, context);
     } else if let Ok(ref date) = JsDate::from_object(object.clone()) {
         return clone_date(object, date, seen, context);
     } else if let Ok(_error) = object.clone().downcast::<Error>() {
-        return Err(js_error!(TypeError: "Errors are not supported yet."));
+        return Err(seen.unsupported());
     } else if let Ok(ref regexp) = JsRegExp::from_object(object.clone()) {
         return clone_regexp(object, regexp, seen, context);
-    } else if let Ok(_dataview) = JsDataView::from_object(object.clone()) {
-        return Err(js_error!(TypeError: "Data views are not supported yet."));
+    } else if let Ok(view) = JsDataView::from_object(object.clone()) {
+        let byte_length = view.byte_length(context).map_err(|_| seen.unsupported())?;
+        let byte_offset = view.byte_offset(context).map_err(|_| seen.unsupported())?;
+        let buffer = view.buffer(context)?;
+        let buffer = try_from_js_value(&buffer, transfer, seen, context)?;
+        let node = seen.push(ValueStoreInner::DataView {
+            buffer,
+            byte_length,
+            byte_offset,
+        })?;
+        seen.insert(object, node);
+        return Ok(node);
     } else if object.is_callable() {
         // Functions are invalid.
-        return Err(unsupported_type());
+        return Err(seen.unsupported());
+    }
+
+    if seen.storage && !object.is_ordinary() {
+        return Err(seen.unsupported());
     }
 
     // Create a new object and add own properties to it. This does not preserve
@@ -298,29 +356,54 @@ fn try_from_js_object_clone(
     let dolly = seen.push(ValueStoreInner::Empty)?;
     seen.insert(object, dolly);
 
+    let fields = own_fields(object, transfer, seen, context)?;
+    seen.nodes[dolly] = ValueStoreInner::Object(fields);
+    Ok(dolly)
+}
+
+fn own_fields(
+    object: &JsObject,
+    transfer: &FxHashSet<JsObject>,
+    seen: &mut SeenMap,
+    context: &mut Context,
+) -> JsResult<Vec<(StringStore, NodeId)>> {
     let keys = object.own_property_keys(context)?;
     if keys.len() > 65536 {
         return Err(js_error!(RangeError: "Structured clone field limit exceeded"));
     }
-    let mut fields: Vec<(StringStore, NodeId)> = Vec::with_capacity(keys.len());
+    let mut fields: Vec<(StringStore, NodeId)> = Vec::new();
     for k in keys {
+        if matches!(k, PropertyKey::Symbol(_)) {
+            continue;
+        }
+        let enumerable = object
+            .borrow()
+            .properties()
+            .get(&k)
+            .is_some_and(|descriptor| descriptor.enumerable() == Some(true));
+        if !enumerable {
+            continue;
+        }
         let value = object.get(k.clone(), context)?;
         let key = match k {
             PropertyKey::String(s) => {
                 seen.charge(s.len().saturating_mul(2))?;
                 StringStore::from(s)
             }
-            PropertyKey::Symbol(_) => return Err(unsupported_type()),
-            PropertyKey::Index(i) => JsString::from(format!("{}", i.get())).into(),
+            PropertyKey::Symbol(_) => return Err(seen.unsupported()),
+            PropertyKey::Index(i) => {
+                let key = JsString::from(format!("{}", i.get()));
+                seen.charge(key.len() * 2)?;
+                key.into()
+            }
         };
 
         let v = try_from_js_value(&value, transfer, seen, context)?;
-        seen.charge(size_of::<NodeId>())?;
+        seen.charge(size_of::<(StringStore, NodeId)>())?;
         fields.push((key, v));
     }
 
-    seen.nodes[dolly] = ValueStoreInner::Object(fields);
-    Ok(dolly)
+    Ok(fields)
 }
 
 pub(super) fn try_from_js_value(
@@ -349,6 +432,6 @@ pub(super) fn try_from_js_value(
         JsVariant::Object(ref o) => try_from_js_object(o, transfer, seen, context),
 
         // Symbols cannot be transferred/cloned.
-        JsVariant::Symbol(_) => Err(unsupported_type()),
+        JsVariant::Symbol(_) => Err(seen.unsupported()),
     }
 }

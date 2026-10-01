@@ -22,6 +22,36 @@ pub struct JsTypedArray {
 }
 
 impl JsTypedArray {
+    /// Validate the backing buffer and view bounds without reading JS properties.
+    ///
+    /// # Errors
+    /// Returns a type error for a detached or out-of-bounds view.
+    pub fn validate_view(&self) -> JsResult<()> {
+        TypedArray::validate(&self.inner.clone().into(), Ordering::SeqCst).map(|_| ())
+    }
+
+    /// Recover a view's internal shape against a previously captured backing
+    /// buffer length. Structured serialization uses this after transferring that
+    /// buffer, when its ordinary getters would report detached dimensions.
+    ///
+    /// # Errors
+    /// Returns a type error when the captured buffer cannot contain the view.
+    pub fn shape_for_buffer_length(&self, byte_length: usize) -> JsResult<(usize, usize)> {
+        let array = self
+            .inner
+            .downcast_ref::<TypedArray>()
+            .expect("JsTypedArray is branded");
+        if array.is_out_of_bounds(byte_length) {
+            return Err(JsNativeError::typ()
+                .with_message("Typed array is out of bounds")
+                .into());
+        }
+        Ok((
+            array.byte_offset() as usize,
+            array.array_length(byte_length) as usize,
+        ))
+    }
+
     /// Create a [`JsTypedArray`] from a [`JsObject`], if the object is not a typed array throw a
     /// `TypeError`.
     ///
@@ -1343,6 +1373,29 @@ pub fn js_typed_array_from_kind(
             JsFloat64Array::from_array_buffer(inner, context).map(Into::into)
         }
     }
+}
+
+/// Create a fixed-length view using the intrinsic constructor, without consulting
+/// page-replaceable constructor properties.
+///
+/// # Errors
+/// Returns the intrinsic constructor error for an invalid range or buffer.
+pub fn js_typed_array_view_from_kind(
+    kind: TypedArrayKind,
+    buffer: JsArrayBuffer,
+    byte_offset: usize,
+    length: usize,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let constructor =
+        kind.standard_constructor()(context.intrinsics().constructors()).constructor();
+    constructor
+        .construct(
+            &[buffer.into(), byte_offset.into(), length.into()],
+            None,
+            context,
+        )
+        .map(Into::into)
 }
 
 #[test]
