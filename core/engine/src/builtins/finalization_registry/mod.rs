@@ -1,21 +1,15 @@
 //! Boa's implementation of ECMAScript's `FinalizationRegistry` object.
 
-use std::{
-    cell::{Cell, RefCell},
-    slice,
-};
+use std::{cell::Cell, slice};
 
 use boa_gc::{Ephemeron, Finalize, Gc, Trace, WeakGc};
 
 use crate::{
     Context, JsArgs, JsData, JsObject, JsResult, JsSymbol, JsValue, JsVariant,
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
-    job::{Job, JobCallback, NativeAsyncJob},
+    job::{FinalizationRegistryCleanupJob, Job, JobCallback},
     js_error, js_string,
-    object::{
-        ErasedVTableObject, JsFunction, VTableObject,
-        internal_methods::get_prototype_from_constructor,
-    },
+    object::{ErasedVTableObject, JsFunction, internal_methods::get_prototype_from_constructor},
     property::Attribute,
     realm::Realm,
     string::StaticJsStrings,
@@ -146,6 +140,9 @@ impl BuiltInConstructor for FinalizationRegistry {
         // 7. Set finalizationRegistry.[[Cells]] to a new empty List.
         let cells = Vec::new();
 
+        if !context.job_executor().can_enqueue_finalization_registry() {
+            return Err(js_error!(RangeError: "FinalizationRegistry job limit exceeded"));
+        }
         let (sender, receiver) = async_channel::bounded(1);
 
         let registry = JsObject::new_unique(
@@ -158,37 +155,9 @@ impl BuiltInConstructor for FinalizationRegistry {
             },
         );
 
-        let weak_registry = WeakGc::new(registry.inner());
-
-        {
-            async fn inner_cleanup(
-                weak_registry: WeakGc<VTableObject<FinalizationRegistry>>,
-                receiver: async_channel::Receiver<()>,
-                context: &RefCell<&mut Context>,
-            ) -> JsResult<JsValue> {
-                let Ok(()) = receiver.recv().await else {
-                    return Ok(JsValue::undefined());
-                };
-
-                let Some(registry) = weak_registry.upgrade().map(JsObject::from_inner) else {
-                    return Ok(JsValue::undefined());
-                };
-
-                let result = FinalizationRegistry::cleanup(&registry, &mut context.borrow_mut());
-
-                context
-                    .borrow_mut()
-                    .enqueue_job(Job::FinalizationRegistryCleanupJob(NativeAsyncJob::new(
-                        async move |context| inner_cleanup(weak_registry, receiver, context).await,
-                    )));
-
-                result.map(|()| JsValue::undefined())
-            }
-
-            context.enqueue_job(Job::FinalizationRegistryCleanupJob(NativeAsyncJob::new(
-                async move |ctx| inner_cleanup(weak_registry, receiver, ctx).await,
-            )));
-        }
+        context.enqueue_job(Job::FinalizationRegistryCleanupJob(
+            FinalizationRegistryCleanupJob::new(WeakGc::new(registry.inner()), receiver),
+        ));
 
         // 8. Return finalizationRegistry.
         Ok(registry.upcast().into())
@@ -262,6 +231,11 @@ impl FinalizationRegistry {
                 ));
             }
         };
+
+        // Bound storage and the native scans used by unregister and cleanup.
+        if registry.cells.len() >= 65_536 {
+            return Err(js_error!(RangeError: "FinalizationRegistry cell limit exceeded"));
+        }
 
         // 6. Let cell be the Record { [[WeakRefTarget]]: target, [[HeldValue]]: heldValue, [[UnregisterToken]]: unregisterToken }.
         let cell = RegistryCell {
@@ -351,8 +325,8 @@ impl FinalizationRegistry {
 
     /// Abstract operation [`CleanupFinalizationRegistry ( finalizationRegistry )`][spec].
     ///
-    /// Cleans up all the cells of the finalization registry that are determined to be
-    /// unreachable by the garbage collector.
+    /// Cleans up at most one collected cell and rearms notification delivery
+    /// when other collected cells remain, including after callback failure.
     ///
     /// # Panics
     ///
@@ -373,31 +347,41 @@ impl FinalizationRegistry {
             JobCallback::new(context.intrinsics().objects().throw_type_error(), ()),
         );
 
-        let mut i = 0;
-        let result = loop {
-            if i >= obj.borrow().data().cells.len() {
-                break Ok(());
-            }
-            // 3. While finalizationRegistry.[[Cells]] contains a Record cell such that cell.[[WeakRefTarget]] is empty, an implementation may perform the following steps:
-            if obj.borrow().data().cells[i].target.has_value() {
-                i += 1;
-            } else {
-                // a. Choose any such cell.
-                // b. Remove cell from finalizationRegistry.[[Cells]].
-                let cell = obj.borrow_mut().data_mut().cells.swap_remove(i);
-                // c. Perform ? HostCallJobCallback(callback, undefined, « cell.[[HeldValue]] »).
-                let result = context.host_hooks().call_job_callback(
+        // Run at most one callback per job turn. Callbacks can register and
+        // collect more targets, so draining until empty would be unbounded.
+        let index = obj
+            .borrow()
+            .data()
+            .cells
+            .iter()
+            .position(|cell| !cell.target.has_value());
+        let result = if let Some(index) = index {
+            let cell = obj.borrow_mut().data_mut().cells.swap_remove(index);
+            context
+                .host_hooks()
+                .call_job_callback(
                     &callback,
                     &JsValue::undefined(),
                     slice::from_ref(&cell.held_value),
                     context,
-                );
-
-                if let Err(err) = result {
-                    break Err(err);
-                }
-            }
+                )
+                .map(|_| ())
+        } else {
+            Ok(())
         };
+
+        // Re-arm even after a throwing callback. Coalesced GC notifications
+        // must not strand other collected cells.
+        let registry = obj.borrow();
+        if registry
+            .data()
+            .cells
+            .iter()
+            .any(|cell| !cell.target.has_value())
+        {
+            let _ = registry.data().cleanup_notifier.try_send(());
+        }
+        drop(registry);
 
         obj.borrow_mut().data_mut().callback = callback;
 

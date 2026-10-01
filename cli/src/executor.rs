@@ -8,7 +8,9 @@ use std::{
 
 use boa_engine::{
     Context, JsResult, JsValue,
-    job::{GenericJob, Job, JobExecutor, NativeAsyncJob, PromiseJob},
+    job::{
+        FinalizationRegistryCleanupJob, GenericJob, Job, JobExecutor, NativeAsyncJob, PromiseJob,
+    },
 };
 use futures_concurrency::future::FutureGroup;
 use smol::{future::FutureExt, stream::StreamExt};
@@ -20,13 +22,22 @@ pub(crate) struct Executor {
     promise_jobs: RefCell<VecDeque<PromiseJob>>,
     async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
     generic_jobs: RefCell<VecDeque<GenericJob>>,
-    finalization_registry_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    finalization_registry_jobs: RefCell<VecDeque<FinalizationRegistryCleanupJob>>,
     wake_event: Event<()>,
     idle_event: Event<()>,
     idle_counter: Cell<u8>,
 
     stop_event: Event<()>,
     printer: SharedExternalPrinterLogger,
+}
+
+/// Account for idle tasks even when their waiting future is cancelled.
+struct IdleWait<'a>(&'a Cell<u8>);
+
+impl Drop for IdleWait<'_> {
+    fn drop(&mut self) {
+        self.0.update(|count| count - 1);
+    }
 }
 
 impl Executor {
@@ -60,10 +71,10 @@ impl Executor {
         self.idle_event.notify(u8::MAX);
 
         self.idle_counter.update(|n| n + 1);
+        let _idle = IdleWait(&self.idle_counter);
         (&mut listener).await;
         // Restore the listener after usage.
         listener.as_mut().listen();
-        self.idle_counter.update(|n| n - 1);
     }
 
     /// Continually run all pending promise jobs, yielding to the async
@@ -150,46 +161,71 @@ impl Executor {
         }
     }
 
-    /// Continually run all finalization registry async jobs.
-    ///
-    /// This does not need to yield to the async executor after every run because
-    /// it assumes that every async job will not block the execution thread.
+    fn run_ready_cleanup(&self, context: &mut Context) -> bool {
+        let job = {
+            let mut jobs = self.finalization_registry_jobs.borrow_mut();
+            jobs.retain(|job| !job.is_finished());
+            let Some(index) = jobs
+                .iter()
+                .position(FinalizationRegistryCleanupJob::is_ready)
+            else {
+                return false;
+            };
+            let job = jobs
+                .remove(index)
+                .expect("position names an existing cleanup handle");
+            jobs.push_back(job.clone());
+            job
+        };
+        if let Err(err) = job.call(context) {
+            self.printer.print(uncaught_job_error(&err));
+        }
+        true
+    }
+
+    /// Deliver ready GC notifications at idle without retaining a Context borrow.
     async fn run_finalization_registry_jobs(&self, context: &RefCell<&mut Context>) {
-        let mut group = FutureGroup::new();
         let mut listener = pin!(EventListener::new(&self.wake_event));
         loop {
-            if self.finalization_registry_jobs.borrow().is_empty() && group.is_empty() {
-                (&mut listener).await;
-
-                // Restore the listener since it should have been consumed by
-                // the await.
-                listener.as_mut().listen();
+            let mut group = FutureGroup::new();
+            {
+                let mut jobs = self.finalization_registry_jobs.borrow_mut();
+                jobs.retain(|job| !job.is_finished());
+                for job in jobs.iter().cloned() {
+                    group.insert(async move {
+                        job.wait_until_ready().await;
+                        job
+                    });
+                }
             }
-
-            for job in mem::take(&mut *self.finalization_registry_jobs.borrow_mut()) {
-                group.insert(job.call(context));
-            }
-
             let wake = async {
                 (&mut listener).await;
-
-                // Restore the listener since it should have been consumed by
-                // the await.
                 listener.as_mut().listen();
             };
-
-            let next_job = async {
-                if let Some(Err(err)) = group.next().await {
+            if group.is_empty() {
+                wake.await;
+                continue;
+            }
+            let next = async {
+                if let Some(job) = group.next().await
+                    && let Err(err) = job.call(&mut context.borrow_mut())
+                {
                     self.printer.print(uncaught_job_error(&err));
                 }
             };
-
-            wake.or(next_job).await;
+            wake.or(next).await;
+            smol::future::yield_now().await;
         }
     }
 }
 
 impl JobExecutor for Executor {
+    fn can_enqueue_finalization_registry(&self) -> bool {
+        let mut jobs = self.finalization_registry_jobs.borrow_mut();
+        jobs.retain(|job| !job.is_finished());
+        jobs.len() < 4096
+    }
+
     fn enqueue_job(self: Rc<Self>, job: Job, _context: &mut Context) {
         match job {
             Job::PromiseJob(job) => self.promise_jobs.borrow_mut().push_back(job),
@@ -274,11 +310,18 @@ impl JobExecutor for Executor {
         let background = async {
             let mut listener = pin!(EventListener::new(&self.idle_event));
             let mut run_fr_jobs = pin!(self.run_finalization_registry_jobs(context));
+            let mut cleanup_turns = 0;
             loop {
                 let idle_tasks = self.idle_counter.get();
-                // We need to have all 3 tasks idle to exit from the event loop.
+                // Check ready notifications before declaring idle. Yield after
+                // each callback so any Promise it enqueued can run first.
                 if idle_tasks >= 3 {
-                    return;
+                    if cleanup_turns >= 128 || !self.run_ready_cleanup(&mut context.borrow_mut()) {
+                        return;
+                    }
+                    cleanup_turns += 1;
+                    smol::future::yield_now().await;
+                    continue;
                 }
 
                 // Since there are still pending tasks awaiting for IO
@@ -307,5 +350,51 @@ impl JobExecutor for Executor {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boa_engine::Source;
+
+    #[test]
+    fn cleanup_runs_at_idle_and_repeated_runs_restore_idle_accounting() {
+        let executor = Rc::new(Executor::new(SharedExternalPrinterLogger::new()));
+        let mut context = Context::builder()
+            .job_executor(executor.clone())
+            .build()
+            .unwrap();
+        context.eval(Source::from_bytes("var values=[]; var registry=new FinalizationRegistry(v=>{values.push(v); Promise.resolve().then(()=>values.push('promise'));}); var target={}; registry.register(target,1);")).unwrap();
+        context.run_jobs().unwrap();
+        assert_eq!(executor.idle_counter.get(), 0);
+        context.eval(Source::from_bytes("target=null")).unwrap();
+        boa_gc::force_collect();
+        context.run_jobs().unwrap();
+        assert_eq!(executor.idle_counter.get(), 0);
+        assert_eq!(
+            context
+                .eval(Source::from_bytes("values.join()==='1,promise'"))
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        context
+            .eval(Source::from_bytes(
+                "target={}; registry.register(target,2);",
+            ))
+            .unwrap();
+        context.run_jobs().unwrap();
+        context.eval(Source::from_bytes("target=null")).unwrap();
+        boa_gc::force_collect();
+        context.run_jobs().unwrap();
+        assert_eq!(
+            context
+                .eval(Source::from_bytes("values.join()==='1,promise,2,promise'"))
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        assert_eq!(executor.idle_counter.get(), 0);
     }
 }

@@ -30,6 +30,9 @@
 //! [JobCallback]: https://tc39.es/ecma262/#sec-jobcallback-records
 //! [`Gc`]: boa_gc::Gc
 
+mod finalization;
+pub use finalization::FinalizationRegistryCleanupJob;
+
 use crate::context::time::{JsDuration, JsInstant};
 use crate::sys::time;
 use crate::{
@@ -729,11 +732,9 @@ pub enum Job {
     GenericJob(GenericJob),
     /// A job that will eventually cleanup a `FinalizationRegistry`.
     ///
-    /// This job differs slightly from the [spec]; originally it's defined
-    /// as being enqueued exactly when a `FinalizationRegistry` needs to call
-    /// `FinalizationRegistry::cleanup`, but here it's defined as an async
-    /// job that suspends execution until it receives a signal from the engine
-    /// that the `FinalizationRegistry` needs to be cleaned up.
+    /// An owned notification handle, retained across idle checkpoints. It holds
+    /// the registry weakly and never borrows a Context between calls. Hosts call
+    /// `is_ready` before `call` and discard handles for which `is_finished` is true.
     ///
     /// # Execution
     ///
@@ -754,7 +755,7 @@ pub enum Job {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-weakref-host-hooks
     /// [execution]: https://tc39.es/ecma262/#sec-weakref-execution
-    FinalizationRegistryCleanupJob(NativeAsyncJob),
+    FinalizationRegistryCleanupJob(FinalizationRegistryCleanupJob),
 }
 
 impl From<NativeAsyncJob> for Job {
@@ -793,6 +794,13 @@ impl From<GenericJob> for Job {
 ///
 /// [Jobs]: https://tc39.es/ecma262/#sec-jobs
 pub trait JobExecutor: Any {
+    /// Whether another persistent cleanup handle can be admitted. The registry
+    /// constructor calls this after user-defined prototype lookup and before
+    /// enqueueing, without running script between admission and enqueueing.
+    fn can_enqueue_finalization_registry(&self) -> bool {
+        true
+    }
+
     /// Enqueues a `Job` on the executor.
     ///
     /// This method combines all the host-defined job enqueueing operations into a single method.
@@ -870,7 +878,7 @@ impl ClockJob {
 pub struct SimpleJobExecutor {
     promise_jobs: RefCell<VecDeque<PromiseJob>>,
     async_jobs: RefCell<VecDeque<NativeAsyncJob>>,
-    finalization_registry_jobs: RefCell<VecDeque<NativeAsyncJob>>,
+    finalization_registry_jobs: RefCell<VecDeque<FinalizationRegistryCleanupJob>>,
     clock_jobs: RefCell<BTreeMap<JsInstant, Vec<ClockJob>>>,
     generic_jobs: RefCell<VecDeque<GenericJob>>,
     stop: Arc<AtomicBool>,
@@ -915,6 +923,12 @@ impl SimpleJobExecutor {
 }
 
 impl JobExecutor for SimpleJobExecutor {
+    fn can_enqueue_finalization_registry(&self) -> bool {
+        let mut jobs = self.finalization_registry_jobs.borrow_mut();
+        jobs.retain(|job| !job.is_finished());
+        jobs.len() < 4096
+    }
+
     fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
         match job {
             Job::PromiseJob(p) => self.promise_jobs.borrow_mut().push_back(p),
@@ -951,20 +965,17 @@ impl JobExecutor for SimpleJobExecutor {
         Self: Sized,
     {
         let mut group = FutureGroup::new();
-        let mut fr_group = FutureGroup::new();
+        let mut cleanup_turns = 0;
         loop {
             if self.stop.load(Ordering::Relaxed) {
                 self.stop.store(false, Ordering::Relaxed);
                 self.clear();
+                self.finalization_registry_jobs.borrow_mut().clear();
                 return Ok(());
             }
 
             for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
                 group.insert(job.call(context));
-            }
-
-            for job in mem::take(&mut *self.finalization_registry_jobs.borrow_mut()) {
-                fr_group.insert(job.call(context));
             }
 
             // Dispatch all past-due timeout jobs before the termination check.
@@ -1010,14 +1021,27 @@ impl JobExecutor for SimpleJobExecutor {
             }
 
             if self.is_empty() && group.is_empty() {
-                match future::poll_once(fr_group.next()).await.flatten() {
-                    Some(Err(err)) => {
-                        self.clear();
-                        return Err(err);
-                    }
-                    _ if !self.is_empty() => {}
-                    _ => break,
+                context.borrow_mut().clear_kept_objects();
+                let job = {
+                    let mut jobs = self.finalization_registry_jobs.borrow_mut();
+                    jobs.retain(|job| !job.is_finished());
+                    jobs.iter()
+                        .position(FinalizationRegistryCleanupJob::is_ready)
+                        .and_then(|index| jobs.remove(index))
+                };
+                let Some(job) = job else { break };
+                if cleanup_turns >= 128 {
+                    self.finalization_registry_jobs.borrow_mut().push_back(job);
+                    break;
                 }
+                cleanup_turns += 1;
+                self.finalization_registry_jobs
+                    .borrow_mut()
+                    .push_back(job.clone());
+                // Report cleanup failure without discarding Promise work that
+                // the callback queued; the next checkpoint can resume both.
+                job.call(&mut context.borrow_mut())?;
+                continue;
             }
 
             if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
