@@ -382,17 +382,22 @@ fn own_fields(
     if keys.len() > 65536 {
         return Err(js_error!(RangeError: "Structured clone field limit exceeded"));
     }
+    // Snapshot enumerable keys before the first getter. Later getters may change
+    // attributes; only removal excludes a key from the captured list (HTML 2.7.3).
+    let keys: Vec<_> = keys
+        .into_iter()
+        .filter(|key| {
+            !matches!(key, PropertyKey::Symbol(_))
+                && object
+                    .borrow()
+                    .properties()
+                    .get(key)
+                    .is_some_and(|descriptor| descriptor.enumerable() == Some(true))
+        })
+        .collect();
     let mut fields: Vec<(StringStore, NodeId)> = Vec::new();
     for k in keys {
-        if matches!(k, PropertyKey::Symbol(_)) {
-            continue;
-        }
-        let enumerable = object
-            .borrow()
-            .properties()
-            .get(&k)
-            .is_some_and(|descriptor| descriptor.enumerable() == Some(true));
-        if !enumerable {
+        if object.borrow().properties().get(&k).is_none() {
             continue;
         }
         let value = object.get(k.clone(), context)?;

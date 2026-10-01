@@ -415,3 +415,22 @@ fn transferred_views_keep_captured_slots_after_getter_shrink() {
     assert!(cx.eval(Source::from_bytes("(()=>{try{restored.view.byteLength;return false}catch(e){return e instanceof TypeError}})()")).unwrap().to_boolean());
     assert!(cx.eval(Source::from_bytes("restored.typed.buffer.resize(8);restored.typed.byteOffset===4 && restored.typed.length===4 && restored.view.byteOffset===4 && restored.view.byteLength===4")).unwrap().to_boolean());
 }
+
+#[test]
+fn error_data_messages_are_converted_and_preserve_conversion_exceptions() {
+    let mut cx = context();
+    assert!(
+        cx.eval(Source::from_bytes(
+            "(()=>{const e=new Error();e.message=42;return clone(e).message==='42'})()"
+        ))
+        .unwrap()
+        .to_boolean()
+    );
+    assert!(cx.eval(Source::from_bytes("(()=>{const marker={};const e=new Error();e.message={toString(){throw marker}};try{clone(e)}catch(error){return error===marker}return false})()")).unwrap().to_boolean());
+}
+
+#[test]
+fn enumerable_keys_are_snapshotted_before_getters_change_attributes() {
+    let mut cx = context();
+    assert!(cx.eval(Source::from_bytes("(()=>{const a={get first(){Object.defineProperty(a,'visible',{enumerable:false});Object.defineProperty(a,'hidden',{enumerable:true});return 1},visible:2};Object.defineProperty(a,'hidden',{value:3,enumerable:false,configurable:true});const b=clone(a);return Object.keys(b).join()==='first,visible' && b.visible===2 && !('hidden' in b)})()")).unwrap().to_boolean());
+}

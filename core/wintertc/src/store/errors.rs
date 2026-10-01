@@ -26,8 +26,8 @@ pub(super) fn serialize(
         _ => ErrorKind::Error,
     };
     let message = own_data(object, "message")
-        .as_ref()
-        .and_then(JsValue::as_string);
+        .map(|value| value.to_string(context))
+        .transpose()?;
     let message = capture_string(message, seen)?;
     let stack = object.get(js_string!("stack"), context)?.as_string();
     let stack = capture_string(stack, seen)?;
