@@ -194,3 +194,17 @@ fn function_constructor_early_errors_super() {
         ),
     ]);
 }
+
+#[test]
+fn dynamic_function_inputs_require_end_of_input() {
+    run_test_actions([
+        TestAction::assert(indoc! {r#"
+            [Function, (async function(){}).constructor,
+             (function*(){}).constructor, (async function*(){}).constructor]
+            .every(C => [() => C('}'), () => C('a)', '')].every(make => {
+                try { make(); return false; } catch (e) { return e instanceof SyntaxError; }
+            }))
+        "#}),
+        TestAction::assert_eq("Function('a', 'return a; // trailing comment')(7)", 7),
+    ]);
+}

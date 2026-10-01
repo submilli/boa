@@ -20,7 +20,7 @@ use crate::{
     source::ReadChar,
 };
 use boa_ast::{
-    Position, StatementList,
+    Position, Spanned, StatementList,
     function::{FormalParameterList, FunctionBody},
     operations::{
         ContainsSymbol, all_private_identifiers_valid, check_labels, contains,
@@ -247,7 +247,9 @@ impl<'a, R: ReadChar> Parser<'a, R> {
     ) -> ParseResult<FunctionBody> {
         let mut parser = FunctionStatementList::new(allow_yield, allow_await, "function body");
         parser.parse_full_input(true);
-        parser.parse(&mut self.cursor, interner)
+        let body = parser.parse(&mut self.cursor, interner)?;
+        self.expect_end_of_input(interner)?;
+        Ok(body)
     }
 
     /// Parses the full input as an [ECMAScript `FormalParameterList`][spec] into the boa AST representation.
@@ -263,7 +265,22 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         allow_yield: bool,
         allow_await: bool,
     ) -> ParseResult<FormalParameterList> {
-        FormalParameters::new(allow_yield, allow_await).parse(&mut self.cursor, interner)
+        let parameters =
+            FormalParameters::new(allow_yield, allow_await).parse(&mut self.cursor, interner)?;
+        self.expect_end_of_input(interner)?;
+        Ok(parameters)
+    }
+
+    /// Standalone dynamic-function inputs cannot stop at an enclosing delimiter.
+    fn expect_end_of_input(&mut self, interner: &mut Interner) -> ParseResult<()> {
+        if let Some(token) = self.cursor.peek(0, interner)? {
+            return Err(Error::unexpected(
+                token.to_string(interner),
+                token.span(),
+                "expected end of input",
+            ));
+        }
+        Ok(())
     }
 }
 
