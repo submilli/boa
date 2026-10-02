@@ -495,3 +495,31 @@ fn intersection_other_not_set_like() {
         ),
     ]);
 }
+
+#[test]
+fn clear_preserves_active_iterator_positions() {
+    run_test_actions([
+        TestAction::run(
+            "const s = new Set(['a', 'b']); const first = s.values(); const second = s.entries(); first.next(); second.next(); second.next(); s.clear(); s.add('c');",
+        ),
+        TestAction::assert_eq("s.size", 1),
+        TestAction::assert_eq("first.next().value", crate::js_string!("c")),
+        TestAction::assert_eq("second.next().value.join(',')", crate::js_string!("c,c")),
+        TestAction::assert("first.next().done"),
+        TestAction::assert("second.next().done"),
+        TestAction::run("s.clear(); s.add('d');"),
+        TestAction::assert_eq("Array.from(s).join(',')", crate::js_string!("d")),
+    ]);
+}
+
+#[test]
+fn clear_during_for_each_visits_later_additions() {
+    run_test_actions([
+        TestAction::run(
+            "const s = new Set(['a', 'b']); const seen = []; s.forEach(v => { seen.push(v); if (v === 'a') { s.clear(); s.add('c'); s.delete('c'); s.add('d'); } });",
+        ),
+        TestAction::assert_eq("seen.join(',')", crate::js_string!("a,d")),
+        TestAction::assert_eq("s.size", 1),
+        TestAction::assert_eq("Array.from(s).join(',')", crate::js_string!("d")),
+    ]);
+}

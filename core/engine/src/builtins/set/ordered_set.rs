@@ -100,12 +100,16 @@ impl OrderedSet {
         }
     }
 
-    /// Removes all elements in the set, while preserving its capacity.
+    /// Removes values, preserving iterator positions while the set is locked.
     #[inline]
     pub fn clear(&mut self) {
+        // Active iterators retain numeric positions in [[SetData]]. Clearing
+        // replaces entries with empty slots so later additions remain visible
+        // beyond every iterator's previous position (ECMA-262 Set.prototype.clear).
+        let retained = if self.lock == 0 { 0 } else { self.inner.len() };
         self.inner.clear();
-        self.inner.shrink_to_fit();
-        self.empty_count = 0;
+        self.inner.extend((0..retained).map(MapKey::Empty));
+        self.empty_count = retained;
     }
 
     /// Checks if a given value is present in the set
