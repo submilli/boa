@@ -38,3 +38,43 @@ fn object_properties_return_order() {
         ),
     ]);
 }
+
+#[test]
+fn callable_realm_resolves_targets_without_running_script() {
+    use crate::{Context, Source};
+    let context = &mut Context::default();
+    let caller = context.realm().clone();
+    let owner = context.create_realm().unwrap();
+    context.enter_realm(owner.clone());
+    let ordinary = context.eval(Source::from_bytes("(() => 1)")).unwrap();
+    let native = context.eval(Source::from_bytes("Object")).unwrap();
+    let bound = context
+        .eval(Source::from_bytes("(() => 1).bind(null).bind(null)"))
+        .unwrap();
+    let proxy = context
+        .eval(Source::from_bytes(
+            "new Proxy((() => 1).bind(null), { get() { throw 'trap'; } })",
+        ))
+        .unwrap();
+    let revoked = context
+        .eval(Source::from_bytes(
+            "(() => { const p = Proxy.revocable(() => 1, {}); p.revoke(); return p.proxy; })()",
+        ))
+        .unwrap();
+    context.enter_realm(caller.clone());
+    for value in [ordinary, native, bound, proxy] {
+        assert_eq!(value.as_function().unwrap().realm(context).unwrap(), owner);
+        assert_eq!(*context.realm(), caller);
+    }
+    assert!(
+        revoked
+            .as_function()
+            .unwrap()
+            .realm(context)
+            .unwrap_err()
+            .as_native()
+            .unwrap()
+            .is_type()
+    );
+    assert_eq!(*context.realm(), caller);
+}

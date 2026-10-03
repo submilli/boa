@@ -886,26 +886,29 @@ impl JsObject {
     /// Abstract operation [`GetFunctionRealm`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-getfunctionrealm
-    pub(crate) fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
-        if let Some(fun) = self.downcast_ref::<OrdinaryFunction>() {
-            return Ok(fun.realm().clone());
+    pub(crate) fn get_function_realm(&self, context: &Context) -> JsResult<Realm> {
+        // Bound targets and proxy targets are immutable. Walking this finite
+        // chain iteratively avoids consuming the native stack for wrappers.
+        let mut function = self.clone();
+        loop {
+            if let Some(fun) = function.downcast_ref::<OrdinaryFunction>() {
+                return Ok(fun.realm().clone());
+            }
+            if let Some(fun) = function.downcast_ref::<NativeFunctionObject>() {
+                return Ok(fun.realm.clone().unwrap_or_else(|| context.realm().clone()));
+            }
+            let target = if let Some(bound) = function.downcast_ref::<BoundFunction>() {
+                Some(bound.target_function().clone())
+            } else if let Some(proxy) = function.downcast_ref::<Proxy>() {
+                Some(proxy.try_data()?.0)
+            } else {
+                None
+            };
+            let Some(target) = target else {
+                return Ok(context.realm().clone());
+            };
+            function = target;
         }
-
-        if let Some(f) = self.downcast_ref::<NativeFunctionObject>() {
-            return Ok(f.realm.clone().unwrap_or_else(|| context.realm().clone()));
-        }
-
-        if let Some(bound) = self.downcast_ref::<BoundFunction>() {
-            let fun = bound.target_function().clone();
-            return fun.get_function_realm(context);
-        }
-
-        if let Some(proxy) = self.downcast_ref::<Proxy>() {
-            let (fun, _) = proxy.try_data()?;
-            return fun.get_function_realm(context);
-        }
-
-        Ok(context.realm().clone())
     }
 
     /// `7.3.26 CopyDataProperties ( target, source, excludedItems )`

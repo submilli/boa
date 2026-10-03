@@ -33,6 +33,14 @@ impl FinalizationRegistryCleanupJob {
         }
     }
 
+    /// Resolve the cleanup callback's realm without retaining it in this handle.
+    /// Returns `None` after collection. A revoked callback uses the registry's
+    /// creation realm for reporting the ensuing invocation error.
+    pub fn realm(&self, context: &Context) -> Option<crate::realm::Realm> {
+        let registry = self.registry.upgrade().map(JsObject::from_inner)?;
+        Some(registry.borrow().data().callback_realm(context))
+    }
+
     /// Whether the registry has been collected and the handle can be discarded.
     #[must_use]
     pub fn is_finished(&self) -> bool {
@@ -136,6 +144,7 @@ mod tests {
             .unwrap();
         context.eval(Source::from_bytes("var cleaned=false; var registry=new FinalizationRegistry(()=>cleaned=true); var target={}; registry.register(target,1);")).unwrap();
         let job = executor.0.borrow()[0].clone();
+        assert_eq!(job.realm(&context), Some(context.realm().clone()));
         let notification = Arc::new(Notification::default());
         let waker = Waker::from(notification.clone());
         let mut task = std::task::Context::from_waker(&waker);
@@ -161,5 +170,6 @@ mod tests {
         boa_gc::force_collect();
         boa_gc::force_collect();
         assert!(job.is_finished());
+        assert!(job.realm(&Context::default()).is_none());
     }
 }

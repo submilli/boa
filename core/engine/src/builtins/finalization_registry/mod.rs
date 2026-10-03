@@ -165,6 +165,13 @@ impl BuiltInConstructor for FinalizationRegistry {
 }
 
 impl FinalizationRegistry {
+    pub(crate) fn callback_realm(&self, context: &Context) -> Realm {
+        self.callback
+            .callback()
+            .realm(context)
+            .unwrap_or_else(|_| self.realm.clone())
+    }
+
     /// [`FinalizationRegistry.prototype.register ( target, heldValue [ , unregisterToken ] )`][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/sec-finalization-registry.prototype.register

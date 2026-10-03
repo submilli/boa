@@ -152,6 +152,17 @@ impl JsFunction {
             .then(|| Self::from_object_unchecked(object))
     }
 
+    /// Returns the realm of this callable using ECMAScript `GetFunctionRealm`.
+    ///
+    /// Bound functions and callable proxies resolve through their targets without
+    /// invoking getters or proxy traps. A revoked proxy returns a `TypeError`.
+    /// Host callables without a stored realm use the context's current realm.
+    ///
+    /// See <https://tc39.es/ecma262/#sec-getfunctionrealm>.
+    pub fn realm(&self, context: &Context) -> JsResult<crate::realm::Realm> {
+        self.inner.get_function_realm(context)
+    }
+
     /// Creates a `TypedJsFunction` from a `JsFunction`.
     #[inline]
     #[must_use]
