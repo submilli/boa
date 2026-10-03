@@ -14,6 +14,16 @@ use indoc::indoc;
 use std::fmt::Write;
 
 #[test]
+fn promise_capability_rejects_non_async_frames_in_all_profiles() {
+    let mut context = Context::default();
+    let constructor = context.intrinsics().constructors().promise().constructor();
+    let capability =
+        crate::builtins::promise::PromiseCapability::new(&constructor, &mut context).unwrap();
+    assert!(context.vm.set_promise_capability(capability).is_err());
+    assert_eq!(context.eval(Source::from_bytes("1 + 1")).unwrap(), 2.into());
+}
+
+#[test]
 fn typeof_string() {
     run_test_actions([TestAction::assert_eq(
         indoc! {r#"

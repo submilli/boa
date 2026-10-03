@@ -490,15 +490,12 @@ impl Vm {
         &mut self,
         promise_capability: PromiseCapability,
     ) -> JsResult<()> {
-        #[cfg(debug_assertions)]
-        {
-            if !self.frame().code_block().is_async() {
-                return Err(crate::error::PanicError::new(
-                    "only async functions and modules with a top-level-await \
-                    can have a promise capability",
-                )
-                .into());
-            }
+        if !self.frame().code_block().is_async() {
+            return Err(crate::error::PanicError::new(
+                "only async functions and modules with a top-level-await \
+                can have a promise capability",
+            )
+            .into());
         }
 
         let rp = self.frame().rp as usize;

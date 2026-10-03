@@ -41,7 +41,7 @@ impl<T: Debug + Trace + Finalize> TransitionMap<T> {
 #[derive(Default, Debug, Trace, Finalize)]
 struct Inner {
     properties: Option<Box<TransitionMap<TransitionKey>>>,
-    prototypes: Option<Box<TransitionMap<JsPrototype>>>,
+    prototypes: Option<Box<TransitionMap<Option<usize>>>>,
 }
 
 /// Holds a forward reference to a previously created transition.
@@ -66,7 +66,7 @@ impl ForwardTransition {
     }
 
     /// Insert a prototype transition.
-    pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Gc<SharedShapeInner>) {
+    pub(super) fn insert_prototype(&self, key: &JsPrototype, value: &Gc<SharedShapeInner>) {
         let mut this = self.inner.borrow_mut();
         let prototypes = this.prototypes.get_or_insert_with(Box::default);
 
@@ -74,7 +74,9 @@ impl ForwardTransition {
             prototypes.map.retain(|_, v| v.is_upgradable());
         }
 
-        prototypes.map.insert(key, WeakGc::new(value));
+        prototypes
+            .map
+            .insert(prototype_key(key), WeakGc::new(value));
     }
 
     /// Get a property transition, return [`None`] otherwise.
@@ -88,7 +90,7 @@ impl ForwardTransition {
     pub(super) fn get_prototype(&self, key: &JsPrototype) -> Option<WeakGc<SharedShapeInner>> {
         let this = self.inner.borrow();
         let transitions = this.prototypes.as_ref()?;
-        transitions.map.get(key).cloned()
+        transitions.map.get(&prototype_key(key)).cloned()
     }
 
     /// Prunes the [`WeakGc`]s that have been garbage collected.
@@ -134,4 +136,15 @@ impl ForwardTransition {
             )
         })
     }
+}
+
+/// Cache identities must not retain prototype objects. A live transition shape
+/// owns its prototype, so its address cannot be reused while the weak value
+/// upgrades. An expired value is a cache miss even if its address is reused.
+/// The address is used only for equality/hashing, never dereferenced.
+fn prototype_key(prototype: &JsPrototype) -> Option<usize> {
+    prototype.as_ref().map(|object| {
+        let pointer: *const _ = object.as_ref();
+        pointer.cast::<()>() as usize
+    })
 }
