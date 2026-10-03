@@ -2,6 +2,7 @@
 //!
 //! See <https://developer.mozilla.org/en-US/docs/Web/API/Encoding_API> for more information.
 
+use boa_engine::interop::JsThis;
 use boa_engine::object::builtins::{JsArrayBuffer, JsDataView, JsTypedArray, JsUint8Array};
 use boa_engine::realm::Realm;
 use boa_engine::value::TryFromJs;
@@ -14,13 +15,7 @@ use boa_engine::{
 mod tests;
 
 mod encodings;
-
-/// Options for the [`TextDecoder`] constructor.
-#[derive(Debug, Default, Clone, Copy, TryFromJs)]
-pub struct TextDecoderOptions {
-    #[boa(rename = "ignoreBOM")]
-    ignore_bom: Option<bool>,
-}
+mod streaming;
 
 /// The character encoding used by [`TextDecoder`].
 #[derive(Debug, Default, Clone, Copy)]
@@ -73,6 +68,10 @@ pub struct TextDecoder {
     encoding: Encoding,
     #[unsafe_ignore_trace]
     ignore_bom: bool,
+    #[unsafe_ignore_trace]
+    fatal: bool,
+    #[unsafe_ignore_trace]
+    state: streaming::DecoderState,
 }
 
 #[boa_class]
@@ -86,9 +85,12 @@ impl TextDecoder {
     #[boa(constructor)]
     pub fn constructor(
         encoding: Option<JsString>,
-        options: Option<TextDecoderOptions>,
+        options: JsValue,
+        context: &mut Context,
     ) -> JsResult<Self> {
-        let ignore_bom = options.and_then(|o| o.ignore_bom).unwrap_or(false);
+        let options = dictionary(&options)?;
+        let fatal = option(options.as_ref(), "fatal", context)?;
+        let ignore_bom = option(options.as_ref(), "ignoreBOM", context)?;
 
         let encoding = match encoding {
             Some(enc) => {
@@ -103,6 +105,8 @@ impl TextDecoder {
         Ok(Self {
             encoding,
             ignore_bom,
+            fatal,
+            state: streaming::DecoderState::default(),
         })
     }
 
@@ -131,10 +135,18 @@ impl TextDecoder {
         self.ignore_bom
     }
 
+    /// Whether malformed input produces an exception instead of replacement characters.
+    #[boa(getter)]
+    #[must_use]
+    pub fn fatal(&self) -> bool {
+        self.fatal
+    }
+
     /// The [`TextDecoder.decode()`][mdn] method returns a string containing text decoded from the
     /// buffer passed as a parameter.
     ///
-    /// If `buffer` is omitted or `undefined`, this returns an empty string.
+    /// With `stream: true`, incomplete sequences carry into the next call.
+    /// An omitted buffer flushes pending input unless streaming continues.
     ///
     /// `buffer` can be an `ArrayBuffer`, a `TypedArray` or a `DataView`.
     ///
@@ -142,9 +154,31 @@ impl TextDecoder {
     /// Any error that arises during decoding the specific encoding.
     ///
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder/decode
-    pub fn decode(&self, buffer: JsValue, context: &mut Context) -> JsResult<JsString> {
+    #[boa(method)]
+    pub fn decode(
+        this: JsThis<JsValue>,
+        buffer: JsValue,
+        options: JsValue,
+        context: &mut Context,
+    ) -> JsResult<JsString> {
+        let object = this
+            .as_object()
+            .filter(|object| object.is::<Self>())
+            .ok_or_else(|| js_error!(TypeError: "Invalid TextDecoder receiver"))?;
+        if !buffer.is_undefined() {
+            let valid = buffer.as_object().is_some_and(|input| {
+                JsArrayBuffer::from_object(input.clone()).is_ok()
+                    || JsTypedArray::from_object(input.clone()).is_ok()
+                    || JsDataView::from_object(input).is_ok()
+            });
+            if !valid {
+                return Err(js_error!(TypeError: "Expected a BufferSource"));
+            }
+        }
+        let options = dictionary(&options)?;
+        let stream = option(options.as_ref(), "stream", context)?;
         if buffer.is_undefined() {
-            return Ok(js_string!(""));
+            return decode_bytes(&object, &[], stream);
         }
 
         let mut range = None;
@@ -180,8 +214,6 @@ impl TextDecoder {
             ));
         };
 
-        let strip_bom = !self.ignore_bom;
-
         let Some(full_data) = array_buffer.data() else {
             return Err(js_error!(TypeError: "cannot decode a detached ArrayBuffer"));
         };
@@ -197,15 +229,42 @@ impl TextDecoder {
             &full_data
         };
 
-        Ok(match self.encoding {
-            Encoding::Utf8 => encodings::utf8::decode(data, strip_bom),
-            Encoding::Utf16Le => encodings::utf16le::decode(data, strip_bom),
-            Encoding::Utf16Be => {
-                let owned = data.to_vec();
-                encodings::utf16be::decode(owned, strip_bom)
-            }
-        })
+        decode_bytes(&object, data, stream)
     }
+}
+
+// Dictionary access can run script. No decoder borrow survives these reads.
+fn dictionary(value: &JsValue) -> JsResult<Option<boa_engine::JsObject>> {
+    if value.is_null_or_undefined() {
+        return Ok(None);
+    }
+    value
+        .as_object()
+        .map(Some)
+        .ok_or_else(|| js_error!(TypeError: "Options must be a dictionary"))
+}
+
+fn option(
+    object: Option<&boa_engine::JsObject>,
+    name: &str,
+    context: &mut Context,
+) -> JsResult<bool> {
+    match object {
+        Some(object) => Ok(object.get(JsString::from(name), context)?.to_boolean()),
+        None => Ok(false),
+    }
+}
+
+fn decode_bytes(object: &boa_engine::JsObject, bytes: &[u8], stream: bool) -> JsResult<JsString> {
+    let mut decoder = object
+        .downcast_mut::<TextDecoder>()
+        .expect("validated TextDecoder receiver");
+    let encoding = decoder.encoding;
+    let fatal = decoder.fatal;
+    let ignore_bom = decoder.ignore_bom;
+    decoder
+        .state
+        .decode(bytes, encoding, fatal, ignore_bom, stream)
 }
 
 /// The `TextEncoder`[mdn] class represents a UTF-8 encoder.

@@ -6,7 +6,7 @@ use crate::{
     Context, JsArgs, JsError, JsExpect, JsNativeError, JsResult, JsValue, NativeFunction,
     builtins::{
         Promise,
-        promise::{PromiseState, ResolvingFunctions},
+        promise::{PromiseCapability, PromiseState, ResolvingFunctions},
     },
     job::NativeAsyncJob,
     object::JsObject,
@@ -569,6 +569,33 @@ impl JsPromise {
             .and_then(Self::from_object)
             .js_expect("`inner_then` cannot fail for native `JsPromise`")
             .map_err(Into::into)
+    }
+
+    /// Installs internal reactions without consulting `constructor` or `@@species`.
+    ///
+    /// Host algorithms use this operation when the specification calls
+    /// `PerformPromiseThen` directly. The result is an intrinsic Promise in the
+    /// current realm; callback return values still undergo normal resolution.
+    #[allow(clippy::return_self_not_must_use)] // Hosts may only need observation.
+    pub fn then_internal(
+        &self,
+        on_fulfilled: Option<JsFunction>,
+        on_rejected: Option<JsFunction>,
+        context: &mut Context,
+    ) -> Self {
+        let (result, functions) = Self::new_pending(context);
+        let capability = PromiseCapability {
+            promise: result.inner.clone().upcast(),
+            functions,
+        };
+        Promise::perform_promise_then(
+            &self.inner,
+            on_fulfilled,
+            on_rejected,
+            Some(capability),
+            context,
+        );
+        result
     }
 
     /// Schedules a callback to run when the promise is rejected.

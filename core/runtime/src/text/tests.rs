@@ -476,3 +476,61 @@ fn decoder_handle_data_view_offset_and_length() {
         context,
     );
 }
+
+#[test]
+fn decoder_streaming_unicode_and_fatal() {
+    fn assert_js(source: &'static str) -> TestAction {
+        TestAction::inspect_context(move |context| {
+            let value = context
+                .eval(boa_engine::Source::from_bytes(source))
+                .unwrap();
+            assert_eq!(value.as_boolean(), Some(true), "{source}");
+        })
+    }
+    let context = &mut Context::default();
+    text::register(None, context).unwrap();
+    run_test_actions_with(
+        [
+            TestAction::run(
+                r#"
+            const decoder = new TextDecoder('utf-8', {fatal: true});
+            const part = bytes => decoder.decode(new Uint8Array(bytes), {stream:true});
+        "#,
+            ),
+            assert_js("decoder.fatal"),
+            assert_js("new TextDecoder('utf-8', Object.create({fatal:1})).fatal"),
+            assert_js("!new TextDecoder('utf-8', null).fatal"),
+            assert_js("decoder.decode(undefined, decoder) === ''"),
+            assert_js(
+                "decoder.decode(undefined, {get stream(){return decoder.encoding === 'utf-8'}}) === ''",
+            ),
+            assert_js("part([0xef]) === ''"),
+            assert_js("part([0xbb, 0xbf, 0xc3]) === ''"),
+            assert_js("part([0xa9]) === 'é'"),
+            assert_js("part([0xef, 0xbb, 0xbf]) === '\\uFEFF'"),
+            assert_js("decoder.decode() === ''"),
+            assert_js("part([0xef, 0xbb, 0xbf]) === ''"),
+            assert_js("part([0xf0, 0x9f]) === ''"),
+            assert_js(
+                "(() => {try {decoder.decode()} catch(e) {return e instanceof TypeError}})()",
+            ),
+            assert_js("decoder.decode(new Uint8Array([65])) === 'A'"),
+            assert_js(
+                r#"(() => {
+            for (const label of ['utf-16le', 'utf-16be']) {
+                const d = new TextDecoder(label);
+                const bytes = label === 'utf-16le' ? [0x3d,0xd8,0,0xde] : [0xd8,0x3d,0xde,0];
+                let out = '';
+                for (const b of bytes) out += d.decode(new Uint8Array([b]), {stream:true});
+                if (out + d.decode() !== '😀') return false;
+            }
+            return true;
+        })()"#,
+            ),
+            assert_js(
+                "new TextDecoder('utf-16le').decode(new Uint8Array([0,0xd8,65,0])) === '\\uFFFDA'",
+            ),
+        ],
+        context,
+    );
+}

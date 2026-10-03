@@ -98,3 +98,42 @@ fn promise_race_resolves_first() {
         TestAction::assert_eq("val", 10),
     ]);
 }
+
+#[test]
+fn internal_reactions_ignore_constructor_and_propagate_results() {
+    use crate::builtins::promise::PromiseState;
+    use crate::object::builtins::{JsFunction, JsPromise};
+    use crate::{Context, JsValue, Source};
+    let cx = &mut Context::default();
+    let promise = cx
+        .eval(Source::from_bytes(
+            r#"
+        globalThis.order = [];
+        const p = Promise.resolve(4);
+        Object.defineProperty(p, 'constructor', {get(){throw new Error('constructor accessed')}});
+        p
+    "#,
+        ))
+        .unwrap();
+    let promise = JsPromise::from_object(promise.as_object().unwrap()).unwrap();
+    let handler = cx
+        .eval(Source::from_bytes(
+            r#"
+        value => {order.push(value);return {then(resolve){resolve(value + 1)}}}
+    "#,
+        ))
+        .unwrap();
+    let handler = JsFunction::from_object(handler.as_object().unwrap()).unwrap();
+    let result = promise.then_internal(Some(handler), None, cx);
+    assert!(matches!(result.state(), PromiseState::Pending));
+    cx.run_jobs().unwrap();
+    assert_eq!(result.state(), PromiseState::Fulfilled(5.into()));
+    let (rejected, resolvers) = JsPromise::new_pending(cx);
+    let propagated = rejected.then_internal(None, None, cx);
+    resolvers
+        .reject
+        .call(&JsValue::undefined(), &[7.into()], cx)
+        .unwrap();
+    cx.run_jobs().unwrap();
+    assert_eq!(propagated.state(), PromiseState::Rejected(7.into()));
+}
