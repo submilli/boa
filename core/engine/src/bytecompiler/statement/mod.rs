@@ -58,7 +58,9 @@ impl ByteCompiler<'_> {
 
                 let error = compiler.register_allocator.alloc();
                 compiler.compile_expr(throw.target(), &error);
+                compiler.push_source_position(throw.position());
                 compiler.bytecode.emit_throw(error.variable());
+                compiler.pop_source_position();
                 compiler.register_allocator.dealloc(error);
             }
             Statement::Switch(switch) => {

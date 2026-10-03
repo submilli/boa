@@ -279,8 +279,9 @@ impl Module {
 
         let mut parser = Parser::new(src);
         parser.set_identifier(context.next_parser_identifier());
-        let (module, source) =
-            parser.parse_module_with_source(realm.scope(), context.interner_mut())?;
+        let (module, source) = parser
+            .parse_module_with_source(realm.scope(), context.interner_mut())
+            .map_err(|error| JsError::from(error).with_source_path(path.clone()))?;
 
         let source_text = SourceText::new(source);
         let src = SourceTextModule::new(module, context.interner(), source_text, path.clone());

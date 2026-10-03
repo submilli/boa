@@ -3,6 +3,9 @@
 #[cfg(test)]
 mod tests;
 
+mod location;
+pub use location::SourceLocation;
+
 use crate::{
     Context, JsResult, JsString, JsValue,
     builtins::{
@@ -207,6 +210,9 @@ macro_rules! js_error {
 pub struct JsError {
     inner: Repr,
     pub(crate) backtrace: Option<Backtrace>,
+    // SAFETY: Source metadata contains no garbage-collected values.
+    #[unsafe_ignore_trace]
+    source_location: Option<SourceLocation>,
 }
 
 impl Eq for JsError {}
@@ -410,6 +416,7 @@ impl JsError {
         Self {
             inner: Repr::Native(Box::new(err)),
             backtrace: None,
+            source_location: None,
         }
     }
 
@@ -454,9 +461,13 @@ impl JsError {
             let error = obj.downcast_ref::<Error>()?;
             error.stack.0.backtrace().cloned()
         });
+        let source_location = value
+            .as_object()
+            .and_then(|obj| obj.downcast_ref::<Error>()?.source_location.0.clone());
         Self {
             inner: Repr::Opaque(value),
             backtrace,
+            source_location,
         }
     }
 
@@ -490,6 +501,12 @@ impl JsError {
         match self.inner {
             Repr::Native(e) => {
                 let obj = e.into_opaque(context);
+                // Opaque Error values retain construction stacks. Parser errors
+                // have no such stack, so preserve their source metadata separately.
+                if let Some(mut error) = obj.downcast_mut::<Error>() {
+                    error.source_location =
+                        IgnoreEq(self.source_location.filter(SourceLocation::is_parser));
+                }
                 // Store the backtrace in the Error object so it survives the
                 // JsError → JsValue → JsError round-trip through promise
                 // rejection.
@@ -501,6 +518,15 @@ impl JsError {
                 Ok(obj.into())
             }
             Repr::Opaque(v) => {
+                if let Some(obj) = v.as_object()
+                    && let Some(mut error) = obj.downcast_mut::<Error>()
+                    && self
+                        .source_location
+                        .as_ref()
+                        .is_some_and(SourceLocation::is_parser)
+                {
+                    error.source_location = IgnoreEq(self.source_location);
+                }
                 // Store the backtrace in the Error object for opaque errors
                 // too (e.g. explicit `throw new Error(...)`).
                 if let Some(backtrace) = self.backtrace
@@ -825,7 +851,10 @@ impl JsError {
 impl From<boa_parser::Error> for JsError {
     #[cfg_attr(feature = "native-backtrace", track_caller)]
     fn from(err: boa_parser::Error) -> Self {
-        Self::from(JsNativeError::from(err))
+        let location = location::parser_location(&err);
+        let mut error = Self::from(JsNativeError::from(err));
+        error.source_location = Some(location);
+        error
     }
 }
 
@@ -834,6 +863,7 @@ impl From<JsNativeError> for JsError {
         Self {
             inner: Repr::Native(Box::new(error)),
             backtrace: None,
+            source_location: None,
         }
     }
 }
@@ -843,6 +873,7 @@ impl From<EngineError> for JsError {
         Self {
             inner: Repr::Engine(value),
             backtrace: None,
+            source_location: None,
         }
     }
 }

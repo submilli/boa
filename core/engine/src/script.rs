@@ -96,7 +96,9 @@ impl Script {
             parser.set_strict();
         }
         let scope = context.realm().scope().clone();
-        let (mut code, source) = parser.parse_script_with_source(&scope, context.interner_mut())?;
+        let (mut code, source) = parser
+            .parse_script_with_source(&scope, context.interner_mut())
+            .map_err(|error| crate::JsError::from(error).with_source_path(path.clone()))?;
         if !context.optimizer_options().is_empty() {
             context.optimize_statement_list(code.statements_mut());
         }

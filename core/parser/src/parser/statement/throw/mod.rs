@@ -5,7 +5,7 @@ use crate::{
     parser::{AllowAwait, AllowYield, Cursor, ParseResult, TokenParser, expression::Expression},
     source::ReadChar,
 };
-use boa_ast::{Keyword, statement::Throw};
+use boa_ast::{Keyword, Spanned, statement::Throw};
 use boa_interner::Interner;
 
 /// For statement parsing
@@ -43,7 +43,7 @@ where
     type Output = Throw;
 
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        cursor.expect((Keyword::Throw, false), "throw statement", interner)?;
+        let token = cursor.expect((Keyword::Throw, false), "throw statement", interner)?;
 
         cursor.peek_expect_no_lineterminator(0, "throw statement", interner)?;
 
@@ -52,6 +52,6 @@ where
 
         cursor.expect_semicolon("throw statement", interner)?;
 
-        Ok(Throw::new(expr))
+        Ok(Throw::new(expr).with_position(token.span().start()))
     }
 }

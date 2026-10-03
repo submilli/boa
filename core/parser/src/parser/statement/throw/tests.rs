@@ -9,13 +9,16 @@ fn check_throw_parsing() {
     check_script_parser(
         "throw 'error';",
         vec![
-            Statement::Throw(Throw::new(
-                Literal::new(
-                    interner.get_or_intern_static("error", utf16!("error")),
-                    Span::new((1, 7), (1, 14)),
+            Statement::Throw(
+                Throw::new(
+                    Literal::new(
+                        interner.get_or_intern_static("error", utf16!("error")),
+                        Span::new((1, 7), (1, 14)),
+                    )
+                    .into(),
                 )
-                .into(),
-            ))
+                .with_position(boa_ast::Position::new(1, 1)),
+            )
             .into(),
         ],
         interner,

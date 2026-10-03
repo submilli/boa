@@ -176,3 +176,65 @@ fn eval_error_has_backtrace() {
         }
     }
 }
+
+#[test]
+fn typed_source_locations_survive_opaque_errors_without_reading_stack() {
+    let context = &mut Context::default();
+    let path = Path::new("https://example.test/worker.js");
+    let error = context
+        .eval(
+            Source::from_bytes("\nfunction fail() {\n  throw new Error('failure');\n}\nfail();")
+                .with_path(path),
+        )
+        .unwrap_err();
+    let location = error.source_location().expect("JavaScript frame");
+    assert_eq!(location.path(), Some(path));
+    assert_eq!(location.position(), Some(boa_ast::Position::new(3, 3)));
+    let value = error.into_opaque(context).unwrap();
+    value
+        .as_object()
+        .unwrap()
+        .set(
+            crate::js_string!("stack"),
+            crate::js_string!("forged host path"),
+            true,
+            context,
+        )
+        .unwrap();
+    // Opaque errors retain construction coordinates, independently of the
+    // direct exception's throw keyword and the script-visible stack string.
+    let opaque_location = JsError::from_opaque(value).source_location().unwrap();
+    assert_eq!(opaque_location.path(), Some(path));
+    assert_eq!(
+        opaque_location.position(),
+        Some(boa_ast::Position::new(3, 9))
+    );
+}
+
+#[test]
+fn typed_parser_locations_survive_module_promise_transport() {
+    let context = &mut Context::default();
+    let path = Path::new("https://example.test/imported.js");
+    for module in [false, true] {
+        let source = Source::from_bytes("\nlet value = ;").with_path(path);
+        let error = if module {
+            Module::parse(source, None, context).unwrap_err()
+        } else {
+            crate::Script::parse(source, None, context).unwrap_err()
+        };
+        let location = error.source_location().expect("parser location");
+        assert_eq!(location.path(), Some(path));
+        assert_eq!(location.position(), Some(boa_ast::Position::new(2, 13)));
+        let value = error.into_opaque(context).unwrap();
+        assert_eq!(
+            JsError::from_opaque(value).source_location(),
+            Some(location)
+        );
+    }
+    assert!(
+        JsError::from_native(crate::JsNativeError::typ())
+            .source_location()
+            .is_none()
+    );
+    assert!(JsError::from_opaque(5.into()).source_location().is_none());
+}

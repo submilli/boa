@@ -25,9 +25,23 @@ use core::ops::ControlFlow;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Throw {
     target: Expression,
+    position: Option<crate::Position>,
 }
 
 impl Throw {
+    /// Associates the throw keyword with its source position.
+    #[must_use]
+    pub const fn with_position(mut self, position: crate::Position) -> Self {
+        self.position = Some(position);
+        self
+    }
+
+    /// The throw keyword's source position, when supplied by a parser.
+    #[must_use]
+    pub const fn position(&self) -> Option<crate::Position> {
+        self.position
+    }
+
     /// Gets the target expression of this `Throw` statement.
     #[must_use]
     pub const fn target(&self) -> &Expression {
@@ -37,7 +51,10 @@ impl Throw {
     /// Creates a `Throw` AST node.
     #[must_use]
     pub const fn new(target: Expression) -> Self {
-        Self { target }
+        Self {
+            target,
+            position: None,
+        }
     }
 }
 

@@ -142,6 +142,9 @@ pub struct Error {
     // The position of where the Error was created does not affect equality check.
     #[unsafe_ignore_trace]
     pub(crate) stack: IgnoreEq<ErrorStack>,
+    // SAFETY: Source metadata contains no garbage-collected values.
+    #[unsafe_ignore_trace]
+    pub(crate) source_location: IgnoreEq<Option<crate::error::SourceLocation>>,
 }
 
 impl Error {
@@ -152,6 +155,7 @@ impl Error {
     pub fn new(tag: ErrorKind) -> Self {
         Self {
             tag,
+            source_location: IgnoreEq(None),
             stack: IgnoreEq(ErrorStack::Position(ShadowEntry::Native {
                 function_name: None,
                 source_info: NativeSourceInfo::caller(),
@@ -163,6 +167,7 @@ impl Error {
     pub(crate) fn with_stack(tag: ErrorKind, location: ErrorStack) -> Self {
         Self {
             tag,
+            source_location: IgnoreEq(None),
             stack: IgnoreEq(location),
         }
     }
@@ -173,6 +178,7 @@ impl Error {
         let backtrace = context.vm.shadow_stack.caller_position(limit);
         Self {
             tag,
+            source_location: IgnoreEq(None),
             stack: IgnoreEq(ErrorStack::Backtrace(backtrace)),
         }
     }
