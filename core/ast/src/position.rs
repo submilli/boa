@@ -89,6 +89,14 @@ impl From<(u32, u32)> for Position {
     }
 }
 
+// Generated AST nodes have no source text; match the origin of generated spans.
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Position {
+    fn arbitrary(_u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self::default())
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Span {
     fn arbitrary(_u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
@@ -418,6 +426,22 @@ mod tests {
     #![allow(clippy::similar_names)]
     #![allow(unused_must_use)]
     use super::{LinearPosition, LinearSpan, Position, Span};
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn arbitrary_positions_preserve_the_source_origin_without_input() {
+        use arbitrary::{Arbitrary, Unstructured};
+
+        fn assert_arbitrary<T: for<'a> Arbitrary<'a>>() {}
+
+        let mut input = Unstructured::new(&[]);
+        let position = Position::arbitrary(&mut input).expect("position generation is infallible");
+        assert_eq!(position, Position::new(1, 1));
+        assert_eq!(input.len(), 0);
+
+        // Throw carries an optional Position; its derive must remain usable.
+        assert_arbitrary::<crate::statement::Throw>();
+    }
 
     /// Checks that we cannot create a position with 0 as the column.
     #[test]
