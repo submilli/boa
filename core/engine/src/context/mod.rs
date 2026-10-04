@@ -870,6 +870,17 @@ impl Context {
             .find_map(|frame| frame.active_runnable.clone())
     }
 
+    /// Return the realm of the JavaScript caller of a native function.
+    /// Falls back to the current realm outside a native call.
+    #[must_use]
+    pub fn native_caller_realm(&self) -> Realm {
+        self.vm
+            .native_caller_realms
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.realm().clone())
+    }
+
     /// Return the innermost active script or module evaluation entry.
     ///
     /// Unlike `get_active_script_or_module`, this skips function calls and

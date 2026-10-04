@@ -78,3 +78,50 @@ fn callable_realm_resolves_targets_without_running_script() {
     );
     assert_eq!(*context.realm(), caller);
 }
+
+#[test]
+fn native_function_exposes_its_javascript_caller_realm() {
+    use crate::{
+        Context, NativeFunction, Source, object::FunctionObjectBuilder, property::Attribute,
+    };
+
+    let context = &mut Context::default();
+    let page = context.realm().clone();
+    let native = FunctionObjectBuilder::new(
+        &page,
+        NativeFunction::from_copy_closure(|_, _, context| {
+            Ok((context.native_caller_realm() == *context.realm()).into())
+        }),
+    )
+    .build();
+    context
+        .register_global_property(
+            crate::js_string!("callerIsNativeRealm"),
+            native.clone(),
+            Attribute::all(),
+        )
+        .unwrap();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("callerIsNativeRealm()"))
+            .unwrap(),
+        true.into()
+    );
+
+    let frame = context.create_realm().unwrap();
+    context.enter_realm(frame);
+    context
+        .register_global_property(
+            crate::js_string!("callerIsNativeRealm"),
+            native,
+            Attribute::all(),
+        )
+        .unwrap();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("callerIsNativeRealm()"))
+            .unwrap(),
+        false.into()
+    );
+    assert_eq!(context.native_caller_realm(), *context.realm());
+}

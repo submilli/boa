@@ -88,6 +88,9 @@ pub struct Vm {
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
 
+    /// JavaScript caller realms while native functions run without VM frames.
+    pub(crate) native_caller_realms: Vec<Realm>,
+
     /// Number of nested host calls that re-enter the VM via `Context::run()`.
     ///
     /// This is incremented by high-level host entry points such as
@@ -423,6 +426,7 @@ impl Vm {
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,
+            native_caller_realms: Vec::new(),
             host_call_depth: 0,
             native_recursion_depth: std::rc::Rc::default(),
             shadow_stack: ShadowStack::default(),
