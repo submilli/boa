@@ -30,6 +30,7 @@ pub(crate) struct ForInIterator {
     visited_keys: FxHashSet<JsString>,
     remaining_keys: VecDeque<JsString>,
     object_was_visited: bool,
+    prototype_depth: usize,
 }
 
 impl ForInIterator {
@@ -39,6 +40,7 @@ impl ForInIterator {
             visited_keys: FxHashSet::default(),
             remaining_keys: VecDeque::default(),
             object_was_visited: false,
+            prototype_depth: 0,
         }
     }
 
@@ -133,7 +135,11 @@ impl ForInIterator {
                     }
                 }
             }
-            let proto = object.prototype().clone();
+            crate::object::internal_methods::check_prototype_depth(
+                &mut iterator.prototype_depth,
+                context,
+            )?;
+            let proto = object.__get_prototype_of__(context)?;
             match proto {
                 Some(o) => {
                     object = o;

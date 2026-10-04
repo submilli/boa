@@ -23,6 +23,19 @@ use crate::{
 pub(crate) mod immutable_prototype;
 pub(crate) mod string;
 
+/// Bound iterative prototype walks, including exotic cycles and hooks that
+/// manufacture a fresh prototype at each step. Native recursion guards alone
+/// cannot bound a loop whose hook calls finish between iterations.
+pub(crate) fn check_prototype_depth(depth: &mut usize, context: &Context) -> JsResult<()> {
+    if *depth >= context.runtime_limits().recursion_limit() {
+        return Err(JsNativeError::range()
+            .with_message("Maximum prototype chain depth exceeded")
+            .into());
+    }
+    *depth += 1;
+    Ok(())
+}
+
 /// A lightweight wrapper around [`Context`] used in [`InternalObjectMethods`].
 #[derive(Debug)]
 pub(crate) struct InternalMethodPropertyContext<'ctx> {

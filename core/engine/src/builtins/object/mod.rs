@@ -369,7 +369,9 @@ impl OrdinaryObject {
         let key = args.get_or_undefined(0).to_property_key(context)?;
 
         // 3. Repeat
+        let mut depth = 0;
         loop {
+            crate::object::internal_methods::check_prototype_depth(&mut depth, context)?;
             // a. Let desc be ? O.[[GetOwnProperty]](key).
 
             let desc =
@@ -415,7 +417,9 @@ impl OrdinaryObject {
         let key = args.get_or_undefined(0).to_property_key(context)?;
 
         // 3. Repeat
+        let mut depth = 0;
         loop {
+            crate::object::internal_methods::check_prototype_depth(&mut depth, context)?;
             // a. Let desc be ? O.[[GetOwnProperty]](key).
 
             let desc =
@@ -729,7 +733,9 @@ impl OrdinaryObject {
         }
         let mut v = v.clone();
         let o = JsValue::new(this.to_object(context)?);
+        let mut depth = 0;
         loop {
+            crate::object::internal_methods::check_prototype_depth(&mut depth, context)?;
             v = Self::get_prototype_of(this, &[v], context)?;
             if v.is_null() {
                 return Ok(JsValue::new(false));

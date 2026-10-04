@@ -390,3 +390,154 @@ fn host_enumeration_can_distinguish_own_keys_from_iteration() {
         true.into()
     );
 }
+
+#[derive(Trace, Finalize)]
+struct DynamicPrototype {
+    prototype: GcRefCell<Option<JsObject>>,
+}
+
+impl DynamicPrototype {
+    // The native prototype hook signature permits fallible host queries.
+    #[allow(clippy::unnecessary_wraps)]
+    fn prototype(object: &JsObject, _: &mut Context) -> JsResult<Option<JsObject>> {
+        Ok(object
+            .downcast_ref::<NativeExoticObject<Self>>()
+            .unwrap()
+            .0
+            .prototype
+            .borrow()
+            .clone())
+    }
+}
+
+impl NativeExotic for DynamicPrototype {
+    const GET_PROTOTYPE_OF: Option<boa_engine::object::native_exotic::NativeGetPrototypeOf> =
+        Some(Self::prototype);
+
+    fn set_prototype_of(
+        object: &JsObject,
+        prototype: Option<JsObject>,
+        _: &mut Context,
+    ) -> JsResult<bool> {
+        *object
+            .downcast_ref::<NativeExoticObject<Self>>()
+            .unwrap()
+            .0
+            .prototype
+            .borrow_mut() = prototype;
+        Ok(true)
+    }
+
+    fn is_extensible(_: &JsObject, _: &mut Context) -> JsResult<bool> {
+        Ok(false)
+    }
+}
+
+fn dynamic_prototype_context() -> Context {
+    let mut context = Context::default();
+    context.runtime_limits_mut().set_recursion_limit(100);
+    let object = JsObject::from_proto_and_data(
+        None,
+        NativeExoticObject(DynamicPrototype {
+            prototype: GcRefCell::new(None),
+        }),
+    );
+    context
+        .register_global_property(js_string!("dynamic"), object, Attribute::all())
+        .unwrap();
+    context
+}
+
+#[test]
+fn native_prototype_and_extensibility_hooks_control_reflection_and_lookup() {
+    let mut context = dynamic_prototype_context();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes(
+                r"
+            let ok = !Object.isExtensible(dynamic) && !Reflect.isExtensible(dynamic);
+            const receiver = {receiver: 5};
+            function read(o) { return o.value; }
+            for (let i = 0; i < 200; ++i) {
+                const prototype = {value: i, get inherited() { return this.receiver; }};
+                ok &&= Reflect.setPrototypeOf(dynamic, prototype);
+                ok &&= Object.getPrototypeOf(dynamic) === prototype;
+                ok &&= Reflect.getPrototypeOf(dynamic) === prototype;
+                ok &&= read(dynamic) === i && read(Object.create(dynamic)) === i;
+                let keys = []; for (const key in dynamic) keys.push(key);
+                ok &&= keys.join() === 'value,inherited';
+                ok &&= 'value' in dynamic && !('absent' in dynamic);
+                ok &&= Reflect.get(dynamic, 'inherited', receiver) === 5;
+            }
+            Object.setPrototypeOf(dynamic, null);
+            ok && Object.getPrototypeOf(dynamic) === null && !('value' in dynamic)
+                && dynamic.value === undefined
+        "
+            ))
+            .unwrap(),
+        true.into()
+    );
+}
+
+#[test]
+fn native_dynamic_prototype_cycles_hit_the_recursion_limit() {
+    let mut context = dynamic_prototype_context();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes(
+                r"
+            Object.setPrototypeOf(dynamic, dynamic);
+            let caught = 0;
+            for (const operation of [() => dynamic.missing, () => 'missing' in dynamic,
+                                     () => { dynamic.missing = 1; }]) {
+                try { operation(); } catch (e) { if (e instanceof RangeError) ++caught; }
+            }
+            Object.setPrototypeOf(dynamic, null);
+            caught === 3 && dynamic.missing === undefined
+        "
+            ))
+            .unwrap(),
+        true.into()
+    );
+}
+
+#[test]
+fn default_native_prototypes_preserve_ordinary_cycle_rejection() {
+    check(
+        r"
+        const a = {};
+        Object.setPrototypeOf(map, a);
+        !Reflect.setPrototypeOf(a, map) && Object.getPrototypeOf(map) === a
+    ",
+    );
+}
+
+#[test]
+fn iterative_dynamic_prototype_walks_are_bounded() {
+    let mut context = dynamic_prototype_context();
+    assert_eq!(
+        context
+            .eval(Source::from_bytes(
+                r"
+        Object.setPrototypeOf(dynamic, dynamic);
+        let caught = 0;
+        const operations = [
+            () => Object.prototype.isPrototypeOf.call({}, dynamic),
+            () => dynamic instanceof Object,
+            () => { for (const k in dynamic) {} },
+        ];
+        if (Object.prototype.__lookupGetter__) {
+            operations.push(() => Object.prototype.__lookupGetter__.call(dynamic, 'absent'));
+            operations.push(() => Object.prototype.__lookupSetter__.call(dynamic, 'absent'));
+        }
+        for (const operation of operations) {
+            try { operation(); } catch(e) { if (e instanceof RangeError) ++caught; }
+        }
+        Object.setPrototypeOf(dynamic, null);
+        caught === operations.length && !Object.prototype.isPrototypeOf.call({}, dynamic)
+    "
+            ))
+            .unwrap(),
+        true.into()
+    );
+}

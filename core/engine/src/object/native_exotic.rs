@@ -21,6 +21,9 @@ pub enum NativeKeyEnumeration {
     ForIn,
 }
 
+/// A native prototype query, called without an outstanding payload borrow.
+pub type NativeGetPrototypeOf = fn(&JsObject, &mut Context) -> JsResult<Option<JsObject>>;
+
 /// Native property hooks. Defaults use ordinary algorithms; get/has follow the
 /// overridden own descriptors, including through prototype chains.
 ///
@@ -28,6 +31,22 @@ pub enum NativeKeyEnumeration {
 /// Callbacks can downcast the object to `NativeExoticObject<Self>` to access data.
 /// A callback must release that borrow before invoking script or another hook.
 pub trait NativeExotic: Trace + Sized + 'static {
+    /// Optional `[[GetPrototypeOf]]` override for dynamic host prototypes.
+    /// `None` keeps the ordinary internal method itself, so ordinary prototype
+    /// cycle detection can continue through native objects using the default.
+    const GET_PROTOTYPE_OF: Option<NativeGetPrototypeOf> = None;
+    /// Implements `[[SetPrototypeOf]]`; the embedder enforces its host invariants.
+    fn set_prototype_of(
+        object: &JsObject,
+        prototype: Option<JsObject>,
+        context: &mut Context,
+    ) -> JsResult<bool> {
+        ordinary::set_prototype_of(object, prototype, context)
+    }
+    /// Implements `[[IsExtensible]]`; pair with `prevent_extensions` consistently.
+    fn is_extensible(object: &JsObject, context: &mut Context) -> JsResult<bool> {
+        ordinary::is_extensible(object, context)
+    }
     /// Implements `[[GetOwnProperty]]`; see the ordinary helper for fallback behavior.
     fn get_own_property(
         object: &JsObject,
@@ -104,6 +123,13 @@ impl<T: NativeExotic> JsData for NativeExoticObject<T> {
 
 impl<T: NativeExotic> NativeExoticObject<T> {
     const METHODS: InternalObjectMethods = InternalObjectMethods {
+        __get_prototype_of__: if T::GET_PROTOTYPE_OF.is_some() {
+            Self::get_prototype_of
+        } else {
+            internal_methods::ordinary_get_prototype_of
+        },
+        __set_prototype_of__: Self::set_prototype_of,
+        __is_extensible__: Self::is_extensible,
         __get_own_property__: Self::get_own_property,
         __define_own_property__: Self::define_own_property,
         __set__: Self::set,
@@ -116,6 +142,22 @@ impl<T: NativeExotic> NativeExoticObject<T> {
         __has_property__: Self::has_property,
         ..ORDINARY_INTERNAL_METHODS
     };
+    fn get_prototype_of(object: &JsObject, context: &mut Context) -> JsResult<Option<JsObject>> {
+        let _recursion = context.enter_native_recursion()?;
+        T::GET_PROTOTYPE_OF.unwrap_or(ordinary::get_prototype_of)(object, context)
+    }
+    fn set_prototype_of(
+        object: &JsObject,
+        prototype: Option<JsObject>,
+        context: &mut Context,
+    ) -> JsResult<bool> {
+        let _recursion = context.enter_native_recursion()?;
+        T::set_prototype_of(object, prototype, context)
+    }
+    fn is_extensible(object: &JsObject, context: &mut Context) -> JsResult<bool> {
+        let _recursion = context.enter_native_recursion()?;
+        T::is_extensible(object, context)
+    }
     fn get(
         object: &JsObject,
         key: &PropertyKey,
@@ -217,6 +259,25 @@ pub mod ordinary {
     use super::{
         Context, JsObject, JsResult, JsValue, PropertyDescriptor, PropertyKey, internal_methods,
     };
+    /// Runs the ordinary `get_prototype_of` algorithm on the object.
+    pub fn get_prototype_of(
+        object: &JsObject,
+        context: &mut Context,
+    ) -> JsResult<Option<JsObject>> {
+        internal_methods::ordinary_get_prototype_of(object, context)
+    }
+    /// Runs the ordinary `set_prototype_of` algorithm on the object.
+    pub fn set_prototype_of(
+        object: &JsObject,
+        prototype: Option<JsObject>,
+        context: &mut Context,
+    ) -> JsResult<bool> {
+        internal_methods::ordinary_set_prototype_of(object, prototype, context)
+    }
+    /// Runs the ordinary `is_extensible` algorithm on the object.
+    pub fn is_extensible(object: &JsObject, context: &mut Context) -> JsResult<bool> {
+        internal_methods::ordinary_is_extensible(object, context)
+    }
     /// Runs the ordinary `get_own_property` algorithm on the object.
     pub fn get_own_property(
         object: &JsObject,

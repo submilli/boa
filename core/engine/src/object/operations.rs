@@ -1557,7 +1557,9 @@ impl JsValue {
         })?;
 
         // 6. Repeat,
+        let mut depth = 0;
         loop {
+            super::internal_methods::check_prototype_depth(&mut depth, context)?;
             // a. Set O to ? O.[[GetPrototypeOf]]().
             object = match object
                 .__get_prototype_of__(&mut InternalMethodPropertyContext::new(context))?
