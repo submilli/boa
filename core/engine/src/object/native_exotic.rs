@@ -21,6 +21,11 @@ pub enum NativeKeyEnumeration {
     ForIn,
 }
 
+/// An optional native read override. `None` delegates to the ordinary read
+/// algorithm, retaining its distinction between an absent property and undefined.
+pub type NativeGet =
+    fn(&JsObject, &PropertyKey, JsValue, &mut Context) -> JsResult<Option<JsValue>>;
+
 /// A native prototype query, called without an outstanding payload borrow.
 pub type NativeGetPrototypeOf = fn(&JsObject, &mut Context) -> JsResult<Option<JsObject>>;
 
@@ -35,6 +40,9 @@ pub trait NativeExotic: Trace + Sized + 'static {
     /// `None` keeps the ordinary internal method itself, so ordinary prototype
     /// cycle detection can continue through native objects using the default.
     const GET_PROTOTYPE_OF: Option<NativeGetPrototypeOf> = None;
+    /// Override selected `[[Get]]` reads independently of the own descriptor.
+    /// The engine applies this hook to both get and try-get and prevents caching.
+    const GET: Option<NativeGet> = None;
     /// Implements `[[SetPrototypeOf]]`; the embedder enforces its host invariants.
     fn set_prototype_of(
         object: &JsObject,
@@ -165,6 +173,12 @@ impl<T: NativeExotic> NativeExoticObject<T> {
         context: &mut InternalMethodPropertyContext<'_>,
     ) -> JsResult<JsValue> {
         let _recursion = context.enter_native_recursion()?;
+        context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
+        if let Some(get) = T::GET
+            && let Some(value) = get(object, key, receiver.clone(), context)?
+        {
+            return Ok(value);
+        }
         let result = internal_methods::ordinary_get(object, key, receiver, context);
         context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
         result
@@ -176,6 +190,12 @@ impl<T: NativeExotic> NativeExoticObject<T> {
         context: &mut InternalMethodPropertyContext<'_>,
     ) -> JsResult<Option<JsValue>> {
         let _recursion = context.enter_native_recursion()?;
+        context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
+        if let Some(get) = T::GET
+            && let Some(value) = get(object, key, receiver.clone(), context)?
+        {
+            return Ok(Some(value));
+        }
         let result = internal_methods::ordinary_try_get(object, key, receiver, context);
         context.slot().attributes |= SlotAttributes::NOT_CACHEABLE;
         result

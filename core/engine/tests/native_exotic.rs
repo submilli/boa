@@ -541,3 +541,61 @@ fn iterative_dynamic_prototype_walks_are_bounded() {
         true.into()
     );
 }
+
+#[derive(Trace, Finalize)]
+struct WriteOnly;
+
+impl NativeExotic for WriteOnly {
+    const GET: Option<boa_engine::object::native_exotic::NativeGet> = Some(|_, key, _, _| {
+        if key == &PropertyKey::from(js_string!("href")) {
+            return Err(boa_engine::JsNativeError::typ()
+                .with_message("write only")
+                .into());
+        }
+        Ok(None)
+    });
+
+    fn get_own_property(
+        object: &JsObject,
+        key: &PropertyKey,
+        context: &mut Context,
+    ) -> JsResult<Option<PropertyDescriptor>> {
+        if key == &PropertyKey::from(js_string!("href")) {
+            return Ok(Some(
+                PropertyDescriptor::builder()
+                    .get(JsValue::undefined())
+                    .set(JsValue::undefined())
+                    .enumerable(false)
+                    .configurable(true)
+                    .build(),
+            ));
+        }
+        ordinary::get_own_property(object, key, context)
+    }
+}
+
+#[test]
+fn native_get_can_reject_reads_without_inventing_a_descriptor_getter() {
+    let mut context = Context::default();
+    let object = JsObject::from_proto_and_data(None, NativeExoticObject(WriteOnly));
+    context
+        .register_global_property(js_string!("subject"), object, Attribute::all())
+        .unwrap();
+    let result = context
+        .eval(Source::from_bytes(
+            r"
+        const descriptor = Object.getOwnPropertyDescriptor(subject, 'href');
+        let denied = 0;
+        for (let i = 0; i < 100; i++) {
+            for (const read of [() => subject.href, () => Reflect.get(subject, 'href'),
+                    () => new Proxy(subject, {}).href]) {
+                try { read(); } catch (e) { if (e instanceof TypeError) denied++; }
+            }
+        }
+        descriptor.get === undefined && denied === 300 &&
+            subject.missing === undefined && !('missing' in subject)
+    ",
+        ))
+        .unwrap();
+    assert_eq!(result, JsValue::from(true));
+}
