@@ -12,6 +12,12 @@ pub struct RuntimeLimits {
 
     /// Max function recursion limit
     recursion: usize,
+
+    /// Iterations across one native Array operation, including callback reentry.
+    native_iteration: u64,
+
+    /// Bytes of native Array temporary storage across that operation.
+    native_allocation: u64,
 }
 
 impl Default for RuntimeLimits {
@@ -20,6 +26,8 @@ impl Default for RuntimeLimits {
         Self {
             loop_iteration: u64::MAX,
             recursion: 512,
+            native_iteration: 1_000_000,
+            native_allocation: 64 * 1024 * 1024,
             backtrace_limit: 50,
             stack_size: 1024 * 10,
         }
@@ -93,5 +101,33 @@ impl RuntimeLimits {
     #[inline]
     pub fn set_recursion_limit(&mut self, value: usize) {
         self.recursion = value;
+    }
+}
+
+impl RuntimeLimits {
+    /// Native Array traversal limit. Default: 1,000,000 index visits and sort work
+    /// units per outer operation, shared through nested accessors and callbacks.
+    #[must_use]
+    pub const fn native_iteration_limit(&self) -> u64 {
+        self.native_iteration
+    }
+
+    /// Set the native traversal budget. Zero permits operations with no visits.
+    pub fn set_native_iteration_limit(&mut self, value: u64) {
+        self.native_iteration = value;
+    }
+
+    /// Native Array temporary allocation limit in bytes. Default: 64 `MiB`.
+    /// Includes concatenated string code units and sort buffers; logical sparse
+    /// array lengths do not allocate their advertised size.
+    #[must_use]
+    pub const fn native_allocation_limit(&self) -> u64 {
+        self.native_allocation
+    }
+
+    /// Set the byte budget for one outer native Array operation. Values are
+    /// checked before native-size conversion and fallible allocation.
+    pub fn set_native_allocation_limit(&mut self, value: u64) {
+        self.native_allocation = value;
     }
 }

@@ -48,6 +48,7 @@ mod code_block;
 mod completion_record;
 mod inline_cache;
 mod native_recursion;
+pub(crate) mod native_work;
 mod runtime_limits;
 
 pub(crate) mod opcode;
@@ -100,6 +101,9 @@ pub struct Vm {
 
     /// Active recursive native data walks, including callback reentry.
     native_recursion_depth: std::rc::Rc<std::cell::Cell<usize>>,
+
+    /// Budget shared by active native Array operations and their callbacks.
+    native_work: std::rc::Rc<std::cell::Cell<native_work::WorkState>>,
 
     pub(crate) shadow_stack: ShadowStack,
 
@@ -429,6 +433,7 @@ impl Vm {
             native_caller_realms: Vec::new(),
             host_call_depth: 0,
             native_recursion_depth: std::rc::Rc::default(),
+            native_work: std::rc::Rc::default(),
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
             trace: false,

@@ -31,6 +31,7 @@ use crate::{
     string::StaticJsStrings,
     symbol::JsSymbol,
     value::{IntegerOrInfinity, JsValue},
+    vm::native_work::NativeWork,
 };
 use std::cmp::{Ordering, min};
 
@@ -302,7 +303,11 @@ impl Array {
                     .array()
                     .shape()
                     .to_addr_usize()
+                && borrowed_object.properties().storage[0]
+                    .as_number()
+                    .is_some_and(|old_length| len as f64 >= old_length)
             {
+                // Shrinking must use ArraySetLength to remove indexed properties.
                 // NOTE: The "length" property is the first element.
                 borrowed_object.properties_mut().storage[0] = JsValue::new(len);
                 return Ok(());
@@ -533,6 +538,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         let items = args.get_or_undefined(0);
         let mapfn = args.get_or_undefined(1);
         let this_arg = args.get_or_undefined(2);
@@ -578,6 +584,7 @@ impl Array {
             //     ...
             //     f. Set k to k + 1.
             for k in 0..len {
+                work.step()?;
                 // a. Let Pk be ! ToString(𝔽(k)).
                 // b. Let kValue be ? Get(arrayLike, Pk).
                 let k_value = array_like.get(k, context)?;
@@ -622,6 +629,7 @@ impl Array {
         //     ...
         //     ix. Set k to k + 1.
         for k in 0..9_007_199_254_740_991_u64 {
+            if_abrupt_close_iterator!(work.step(), iterator_record, context);
             // iii. Let next be ? IteratorStepValue(iteratorRecord).
             let Some(next) = iterator_record.step_value(context)? else {
                 // iv. If next is done, then
@@ -695,6 +703,7 @@ impl Array {
     /// [spec]: https://tc39.es/ecma262/#sec-array.of
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/of
     pub(crate) fn of(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let len be the number of elements in items.
         // 2. Let lenNumber be 𝔽(len).
         let len = args.len();
@@ -712,6 +721,7 @@ impl Array {
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for (k, value) in args.iter().enumerate() {
+            work.step()?;
             // a. Let kValue be items[k].
             // b. Let Pk be ! ToString(𝔽(k)).
             // c. Perform ? CreateDataPropertyOrThrow(A, Pk, kValue).
@@ -780,6 +790,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let obj = this.to_object(context)?;
         // 2. Let A be ? ArraySpeciesCreate(O, 0).
@@ -789,6 +800,7 @@ impl Array {
         // 4. Prepend O to items.
         // 5. For each element E of items, do
         for item in std::iter::once(&JsValue::new(obj)).chain(args.iter()) {
+            work.step()?;
             // a. Let spreadable be ? IsConcatSpreadable(E).
             let spreadable = Self::is_concat_spreadable(item, context)?;
             // b. If spreadable is true, then
@@ -809,6 +821,7 @@ impl Array {
                 }
                 // iv. Repeat, while k < len,
                 for k in 0..len {
+                    work.step()?;
                     // 1. Let P be ! ToString(𝔽(k)).
                     // 2. Let exists be ? HasProperty(E, P).
                     // 3. If exists is true, then
@@ -861,6 +874,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -877,6 +891,7 @@ impl Array {
         }
         // 5. For each element E of items, do
         for element in args.iter().cloned() {
+            work.step()?;
             // a. Perform ? Set(O, ! ToString(𝔽(len)), E, true).
             o.set(len, element, true, context)?;
             // b. Set len to len + 1.
@@ -944,6 +959,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -955,6 +971,7 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -988,7 +1005,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        let _recursion = context.enter_native_recursion()?;
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1003,13 +1020,15 @@ impl Array {
         };
 
         // 5. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        work.check_iterations(len)?;
+        let mut r = Vec::<u16>::new();
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
-                r.push(separator.clone());
+                work.append_string(&mut r, &separator)?;
             }
             // b. Let element be ? Get(O, ! ToString(𝔽(k))).
             let element = o.get(k, context)?;
@@ -1020,10 +1039,11 @@ impl Array {
                 element.to_string(context)?
             };
             // d. Set R to the string-concatenation of R and next.
-            r.push(next.clone());
+            work.append_string(&mut r, &next)?;
             // e. Set k to k + 1.
         }
         // 8. Return R.
+        work.bytes((r.len() as u64).saturating_mul(2))?;
         Ok(js_string!(&r[..]).into())
     }
 
@@ -1075,6 +1095,7 @@ impl Array {
         _: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1085,6 +1106,7 @@ impl Array {
         let mut lower = 0;
         // 5. Repeat, while lower ≠ middle,
         while lower != middle {
+            work.step()?;
             // a. Let upper be len - lower - 1.
             let upper = len - lower - 1;
             // Skipped: b. Let upperP be ! ToString(𝔽(upper)).
@@ -1143,6 +1165,7 @@ impl Array {
         _: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1155,6 +1178,7 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for i in 0..len {
+            work.step()?;
             // a. Let from be ! ToString(𝔽(len - k - 1)).
             let from = len - i - 1;
 
@@ -1184,6 +1208,7 @@ impl Array {
     /// [spec]: https://tc39.es/ecma262/#sec-array.prototype.shift
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/shift
     pub(crate) fn shift(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1197,6 +1222,8 @@ impl Array {
             return Ok(JsValue::undefined());
         }
 
+        work.check_iterations(len.saturating_sub(1))?;
+
         // Small optimization for arrays using dense properties
         // TODO: this optimization could be generalized to many other objects with
         // slot-based dense property maps.
@@ -1206,6 +1233,7 @@ impl Array {
                 &mut o_borrow.properties_mut().indexed_properties
                 && len <= dense.len() as u64
             {
+                work.iterations(len.saturating_sub(1))?;
                 let v = dense.remove(0);
                 drop(o_borrow);
                 Self::set_length(&o, len - 1, context)?;
@@ -1215,6 +1243,7 @@ impl Array {
                 &mut o_borrow.properties_mut().indexed_properties
                 && len <= dense.len() as u64
             {
+                work.iterations(len.saturating_sub(1))?;
                 let v = dense.remove(0);
                 drop(o_borrow);
                 Self::set_length(&o, len - 1, context)?;
@@ -1223,6 +1252,7 @@ impl Array {
             if let Some(dense) = o_borrow.properties_mut().dense_indexed_properties_mut()
                 && len <= dense.len() as u64
             {
+                work.iterations(len.saturating_sub(1))?;
                 let v = dense.remove(0);
                 drop(o_borrow);
                 Self::set_length(&o, len - 1, context)?;
@@ -1235,6 +1265,7 @@ impl Array {
         // 5. Let k be 1.
         // 6. Repeat, while k < len,
         for k in 1..len {
+            work.step()?;
             // a. Let from be ! ToString(𝔽(k)).
             let from = k;
             // b. Let to be ! ToString(𝔽(k - 1)).
@@ -1278,6 +1309,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1296,6 +1328,7 @@ impl Array {
             let mut k = len;
             // c. Repeat, while k > 0,
             while k > 0 {
+                work.step()?;
                 // i. Let from be ! ToString(𝔽(k - 1)).
                 let from = k - 1;
                 // ii. Let to be ! ToString(𝔽(k + argCount - 1)).
@@ -1318,6 +1351,7 @@ impl Array {
             // d. Let j be +0𝔽.
             // e. For each element E of items, do
             for (j, e) in args.iter().enumerate() {
+                work.step()?;
                 // i. Perform ? Set(O, ! ToString(j), E, true).
                 o.set(j, e.clone(), true, context)?;
                 // ii. Set j to j + 1𝔽.
@@ -1348,6 +1382,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1362,6 +1397,7 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kPresent be ? HasProperty(O, Pk).
             // c. If kPresent is true, then
@@ -1398,6 +1434,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -1415,6 +1452,7 @@ impl Array {
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let k_present be ? HasProperty(O, Pk).
             // c. If k_present is true, then
@@ -1445,6 +1483,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1490,6 +1529,7 @@ impl Array {
 
         // 10. Repeat, while k < len,
         while k < len {
+            work.step()?;
             // a. Let kPresent be ? HasProperty(O, ! ToString(𝔽(k))).
             // b. If kPresent is true, then
             // b.i. Let elementK be ? Get(O, ! ToString(𝔽(k))).
@@ -1530,6 +1570,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1564,6 +1605,7 @@ impl Array {
 
         // 8. Repeat, while k ≥ 0,
         while k >= 0 {
+            work.step()?;
             // a. Let kPresent be ? HasProperty(O, ! ToString(𝔽(k))).
             // b. If kPresent is true, then
             // b.i. Let elementK be ? Get(O, ! ToString(𝔽(k))).
@@ -1598,6 +1640,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1639,6 +1682,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1678,6 +1722,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1717,6 +1762,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let _work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1757,7 +1803,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        let _recursion = context.enter_native_recursion()?;
+        let _work = context.enter_native_work()?;
         // 1. Let O be ToObject(this value)
         let o = this.to_object(context)?;
 
@@ -1815,7 +1861,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        let _recursion = context.enter_native_recursion()?;
+        let _work = context.enter_native_work()?;
         // 1. Let O be ToObject(this value)
         let o = this.to_object(context)?;
 
@@ -1863,7 +1909,7 @@ impl Array {
         this_arg: &JsValue,
         context: &mut Context,
     ) -> JsResult<u64> {
-        let _recursion = context.enter_native_recursion()?;
+        let work = context.enter_native_work()?;
         // 1. Assert target is Object
         // 2. Assert source is Object
 
@@ -1871,6 +1917,8 @@ impl Array {
         // - IsCallable(mapper_function) is true
         // - thisArg is present
         // - depth is 1
+
+        work.check_iterations(source_len)?;
 
         // 4. Let targetIndex be start
         let mut target_index = start;
@@ -1880,6 +1928,7 @@ impl Array {
 
         // 6. Repeat, while R(sourceIndex) < sourceLen
         while source_index < source_len {
+            work.step()?;
             // a. Let P be ToString(sourceIndex)
             let p = source_index;
 
@@ -1974,6 +2023,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -1996,6 +2046,7 @@ impl Array {
 
         // 11. Repeat, while k < final,
         while k < final_ {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Perform ? Set(O, Pk, value, true).
@@ -2022,6 +2073,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2067,6 +2119,7 @@ impl Array {
 
         // 10. Repeat, while k < len,
         while k < len {
+            work.step()?;
             // a. Let elementK be ? Get(O, ! ToString(𝔽(k))).
             let element_k = o.get(k, context)?;
             // b. If SameValueZero(searchElement, elementK) is true, return true.
@@ -2099,6 +2152,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2127,6 +2181,7 @@ impl Array {
         let mut n: u64 = 0;
         // 14. Repeat, while k < final,
         while k < final_ {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -2165,6 +2220,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let array be ? ToObject(this value).
         let array = this.to_object(context)?;
         // 2. Let len be ? ToLength(? Get(array, "length")).
@@ -2205,15 +2261,17 @@ impl Array {
         };
 
         // 4. Let R be the empty String.
-        let mut r = Vec::with_capacity(len as usize + len.saturating_sub(1) as usize);
+        work.check_iterations(len)?;
+        let mut r = Vec::<u16>::new();
 
         // 5. Let k be 0.
         // 6. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. If k > 0, then
             if k > 0 {
                 // i. Set R to the string-concatenation of R and separator.
-                r.extend(separator.iter());
+                work.append_string(&mut r, &separator)?;
             }
 
             // b. Let nextElement be ? Get(array, ! ToString(k)).
@@ -2231,11 +2289,12 @@ impl Array {
                     .to_string(context)?;
 
                 // ii. Set R to the string-concatenation of R and S.
-                r.extend(s.iter());
+                work.append_string(&mut r, &s)?;
             }
             //     d. Increase k by 1.
         }
         // 7. Return R.
+        work.bytes((r.len() as u64).saturating_mul(2))?;
         Ok(js_string!(&r[..]).into())
     }
 
@@ -2300,6 +2359,7 @@ impl Array {
         items: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -2331,6 +2391,7 @@ impl Array {
         // 13. Let k be 0.
         // 14. Repeat, while k < actualDeleteCount,
         for k in 0..actual_delete_count {
+            work.step()?;
             // a. Let from be ! ToString(𝔽(actualStart + k)).
             // b. If ? HasProperty(O, from) is true, then
             // b.i. Let fromValue be ? Get(O, from).
@@ -2353,6 +2414,7 @@ impl Array {
                 // a. Set k to actualStart.
                 // b. Repeat, while k < (len - actualDeleteCount),
                 for k in actual_start..(len - actual_delete_count) {
+                    work.step()?;
                     // i. Let from be ! ToString(𝔽(k + actualDeleteCount)).
                     let from = k + actual_delete_count;
 
@@ -2375,6 +2437,7 @@ impl Array {
                 // c. Set k to len.
                 // d. Repeat, while k > (len - actualDeleteCount + itemCount),
                 for k in ((len - actual_delete_count + item_count)..len).rev() {
+                    work.step()?;
                     // i. Perform ? DeletePropertyOrThrow(O, ! ToString(𝔽(k - 1))).
                     o.delete_property_or_throw(k, context)?;
 
@@ -2386,6 +2449,7 @@ impl Array {
                 // a. Set k to (len - actualDeleteCount).
                 // b. Repeat, while k > actualStart,
                 for k in (actual_start..len - actual_delete_count).rev() {
+                    work.step()?;
                     // i. Let from be ! ToString(𝔽(k + actualDeleteCount - 1)).
                     let from = k + actual_delete_count;
 
@@ -2411,6 +2475,7 @@ impl Array {
         // 18. Set k to actualStart.
         // 19. For each element E of items, do
         for (i, item) in items.iter().enumerate() {
+            work.step()?;
             //     a. Perform ? Set(O, ! ToString(𝔽(k)), E, true).
             //     b. Set k to k + 1.
             o.set(actual_start + i as u64, item.clone(), true, context)?;
@@ -2429,6 +2494,7 @@ impl Array {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-array.prototype.tospliced
     fn to_spliced(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2469,6 +2535,7 @@ impl Array {
         let mut i = 0;
         // 16. Repeat, while i < actualStart,
         while i < actual_start {
+            work.step()?;
             //     a. Let Pi be ! ToString(𝔽(i)).
             //     b. Let iValue be ? Get(O, Pi).
             let value = o.get(i, context)?;
@@ -2483,6 +2550,7 @@ impl Array {
 
         // 17. For each element E of items, do
         for item in items.iter().cloned() {
+            work.step()?;
             //     a. Let Pi be ! ToString(𝔽(i)).
             //     b. Perform ! CreateDataPropertyOrThrow(A, Pi, E).
             arr.create_data_property_or_throw(i, item, context)
@@ -2497,6 +2565,7 @@ impl Array {
 
         // 18. Repeat, while i < newLen,
         while i < new_len {
+            work.step()?;
             //     a. Let Pi be ! ToString(𝔽(i)).
             //     b. Let from be ! ToString(𝔽(r)).
             //     c. Let fromValue be ? Get(O, from).
@@ -2532,6 +2601,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2552,6 +2622,7 @@ impl Array {
         let mut to = 0u32;
         // 7. Repeat, while k < len,
         for idx in 0..length {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kPresent be ? HasProperty(O, Pk).
             // c. If kPresent is true, then
@@ -2596,6 +2667,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // 2. Let len be ? LengthOfArrayLike(O).
@@ -2608,6 +2680,7 @@ impl Array {
         // 4. Let k be 0.
         // 5. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kPresent be ? HasProperty(O, Pk).
             // c. If kPresent is true, then
@@ -2642,13 +2715,16 @@ impl Array {
     where
         F: Fn(&JsValue, &JsValue, &mut Context) -> JsResult<Ordering>,
     {
+        let work = context.enter_native_work()?;
         // 1. Let items be a new empty List.
-        // doesn't matter if it clamps since it's just a best-effort optimization
-        let mut items = Vec::with_capacity(len as usize);
+        work.check_iterations(len)?;
+        let mut items = Vec::new();
+        work.reserve(&mut items, len)?;
 
         // 2. Let k be 0.
         // 3. Repeat, while k < len,
         for i in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. If holes is skip-holes, then
             let read = if skip_holes {
@@ -2675,7 +2751,7 @@ impl Array {
         // total order, and JS comparators often are not (`() => Math.random()
         // - 0.5` is a common shuffle). The spec leaves the result order
         // implementation-defined then, but it must not fail.
-        merge_sort(&mut items, |x, y| sort_compare(x, y, context))?;
+        merge_sort(&mut items, &work, |x, y| sort_compare(x, y, context))?;
 
         // 5. Return items.
         Ok(items)
@@ -2698,6 +2774,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. If comparefn is not undefined and IsCallable(comparefn) is false, throw a TypeError exception.
         let comparefn = match args.get_or_undefined(0).variant() {
             JsVariant::Object(obj) if obj.is_callable() => Some(obj),
@@ -2731,6 +2808,7 @@ impl Array {
         // 7. Let j be 0.
         // 8. Repeat, while j < itemCount,
         for (j, item) in sorted.into_iter().enumerate() {
+            work.step()?;
             // a. Perform ? Set(obj, ! ToString(𝔽(j)), sortedList[j], true).
             obj.set(j, item, true, context)?;
 
@@ -2741,6 +2819,7 @@ impl Array {
         //    are deleted to preserve the number of holes that were detected and excluded from the sort.
         // 10. Repeat, while j < len,
         for j in sorted_len..len {
+            work.step()?;
             // a. Perform ? DeletePropertyOrThrow(obj, ! ToString(𝔽(j))).
             obj.delete_property_or_throw(j, context)?;
 
@@ -2761,6 +2840,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. If comparefn is not undefined and IsCallable(comparefn) is false, throw a TypeError exception.
         let comparefn = match args.get_or_undefined(0).variant() {
             JsVariant::Object(obj) if obj.is_callable() => Some(obj),
@@ -2794,6 +2874,7 @@ impl Array {
         // 7. Let j be 0.
         // 8. Repeat, while j < len,
         for (i, item) in sorted.into_iter().enumerate() {
+            work.step()?;
             //     a. Perform ! CreateDataPropertyOrThrow(A, ! ToString(𝔽(j)), sortedList[j]).
             arr.create_data_property_or_throw(i, item, context)
                 .js_expect("cannot fail for a newly created array")?;
@@ -2818,6 +2899,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2854,6 +2936,7 @@ impl Array {
             let mut k_present = false;
             // b. Repeat, while kPresent is false and k < len,
             while !k_present && k < len {
+                work.step()?;
                 // i. Let Pk be ! ToString(𝔽(k)).
                 let pk = k;
                 // ii. Set kPresent to ? HasProperty(O, Pk).
@@ -2878,6 +2961,7 @@ impl Array {
 
         // 9. Repeat, while k < len,
         while k < len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -2915,6 +2999,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -2948,6 +3033,7 @@ impl Array {
             let mut k_present = false;
             // b. Repeat, while kPresent is false and k ≥ 0,
             while !k_present && k >= 0 {
+                work.step()?;
                 // i. Let Pk be ! ToString(𝔽(k)).
                 let pk = k;
                 // ii. Set kPresent to ? HasProperty(O, Pk).
@@ -2972,6 +3058,7 @@ impl Array {
 
         // 9. Repeat, while k ≥ 0,
         while k >= 0 {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let pk = k;
             // b. Let kPresent be ? HasProperty(O, Pk).
@@ -3009,6 +3096,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -3053,6 +3141,7 @@ impl Array {
 
         // 18. Repeat, while count > 0,
         while count > 0 {
+            work.step()?;
             // a. Let fromKey be ! ToString(𝔽(from)).
             let from_key = from;
 
@@ -3164,6 +3253,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        let work = context.enter_native_work()?;
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
 
@@ -3199,6 +3289,7 @@ impl Array {
         // 8. Let k be 0.
         // 9. Repeat, while k < len,
         for k in 0..len {
+            work.step()?;
             // a. Let Pk be ! ToString(𝔽(k)).
             let from_value = if k == actual_index {
                 // b. If k is actualIndex, let fromValue be value.
@@ -3391,6 +3482,7 @@ pub(crate) fn find_via_predicate(
     context: &mut Context,
     caller_name: &str,
 ) -> JsResult<(JsValue, JsValue)> {
+    let work = context.enter_native_work()?;
     // 1. If IsCallable(predicate) is false, throw a TypeError exception.
     let predicate = predicate.as_callable().ok_or_else(|| {
         JsNativeError::typ().with_message(format!("{caller_name}: predicate is not callable"))
@@ -3407,6 +3499,7 @@ pub(crate) fn find_via_predicate(
 
     // 4. For each integer k of indices, do
     for k in indices {
+        work.step()?;
         // a. Let Pk be ! ToString(𝔽(k)).
         let pk = k;
 
@@ -3554,6 +3647,7 @@ fn array_set_length(
     desc: PropertyDescriptor,
     context: &mut InternalMethodPropertyContext<'_>,
 ) -> JsResult<bool> {
+    let work = context.enter_native_work()?;
     // 1. If Desc.[[Value]] is absent, then
     let Some(new_len_val) = desc.value() else {
         // a. Return OrdinaryDefineOwnProperty(A, "length", Desc).
@@ -3626,6 +3720,23 @@ fn array_set_length(
         false
     };
 
+    // Admit key collection, sorting and deletion before changing length. A
+    // resource-limit failure must preserve the Array length/index invariant.
+    let ordered_keys = {
+        let borrowed = obj.borrow();
+        let mut keys = Vec::new();
+        for index in borrowed.properties.index_property_keys() {
+            work.step()?;
+            if new_len <= index && index < u32::MAX {
+                work.reserve(&mut keys, 1)?;
+                keys.push(index);
+            }
+        }
+        merge_sort(&mut keys, &work, |x, y| Ok(y.cmp(x)))?;
+        work.iterations(keys.len() as u64)?;
+        keys
+    };
+
     // 15. Let succeeded be ! OrdinaryDefineOwnProperty(A, "length", newLenDesc).
     // 16. If succeeded is false, return false.
     if !ordinary_define_own_property(
@@ -3641,16 +3752,6 @@ fn array_set_length(
 
     // 17. For each own property key P of A that is an array index, whose numeric value is
     // greater than or equal to newLen, in descending numeric index order, do
-    let ordered_keys = {
-        let mut keys: Vec<_> = obj
-            .borrow()
-            .properties
-            .index_property_keys()
-            .filter(|idx| new_len <= *idx && *idx < u32::MAX)
-            .collect();
-        keys.sort_unstable_by(|x, y| y.cmp(x));
-        keys
-    };
 
     for index in ordered_keys {
         // a. Let deleteSucceeded be ! A.[[Delete]](P).
@@ -3702,6 +3803,7 @@ fn array_set_length(
 /// the first error the comparator returns.
 fn merge_sort<T: Clone>(
     items: &mut [T],
+    work: &NativeWork,
     mut compare: impl FnMut(&T, &T) -> JsResult<Ordering>,
 ) -> JsResult<()> {
     const RUN: usize = 8;
@@ -3711,7 +3813,11 @@ fn merge_sort<T: Clone>(
         let end = (start + RUN).min(len);
         for i in start + 1..end {
             let mut j = i;
-            while j > start && compare(&items[j - 1], &items[j])? == Ordering::Greater {
+            while j > start {
+                work.step()?;
+                if compare(&items[j - 1], &items[j])? != Ordering::Greater {
+                    break;
+                }
                 items.swap(j - 1, j);
                 j -= 1;
             }
@@ -3720,7 +3826,8 @@ fn merge_sort<T: Clone>(
     // Merge runs bottom-up. Taking from the left unless it compares greater
     // keeps equal elements in order.
     let mut width = RUN;
-    let mut buffer: Vec<T> = Vec::with_capacity(len);
+    let mut buffer: Vec<T> = Vec::new();
+    work.reserve(&mut buffer, len as u64)?;
     while width < len {
         for start in (0..len).step_by(2 * width) {
             let mid = (start + width).min(len);
@@ -3728,9 +3835,11 @@ fn merge_sort<T: Clone>(
             if mid == end {
                 continue;
             }
+            work.iterations((end - start) as u64)?;
             buffer.clear();
             let (mut i, mut j) = (start, mid);
             while i < mid && j < end {
+                work.step()?;
                 if compare(&items[i], &items[j])? == Ordering::Greater {
                     buffer.push(items[j].clone());
                     j += 1;
