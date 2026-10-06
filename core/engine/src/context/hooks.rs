@@ -58,6 +58,14 @@ use time::{OffsetDateTime, UtcOffset};
 ///
 /// [`Host Hooks`]: https://tc39.es/ecma262/#sec-host-hooks-summary
 pub trait HostHooks {
+    /// Supply the implementation-defined Math.random sequence for the current realm.
+    /// Hosts must return a finite positive-sign value in [0, 1) with approximately
+    /// uniform distribution, and preserve distinct sequences for distinct realms. The default retains the engine's random source.
+    /// <https://tc39.es/ecma262/#sec-math.random>
+    fn math_random(&self, _context: &Context) -> f64 {
+        rand::random()
+    }
+
     /// [`HostMakeJobCallback ( callback )`][spec]
     ///
     /// # Requirements

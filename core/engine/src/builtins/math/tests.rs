@@ -329,3 +329,30 @@ fn trunc() {
         TestAction::assert_eq("Math.trunc(0.123)", 0.0),
     ]);
 }
+
+#[test]
+fn random_uses_host_entropy_for_each_call() {
+    use crate::{Context, Source, context::HostHooks};
+    use std::{cell::Cell, rc::Rc};
+    struct Hooks(Cell<u32>);
+    impl HostHooks for Hooks {
+        fn math_random(&self, _: &Context) -> f64 {
+            let next = self.0.get() + 1;
+            self.0.set(next);
+            f64::from(next) / 8.0
+        }
+    }
+    let mut context = Context::builder()
+        .host_hooks(Rc::new(Hooks(Cell::new(0))))
+        .build()
+        .unwrap();
+    let value = context
+        .eval(Source::from_bytes(
+            "[Math.random(), Math.random(), Math.random.call(null)].join(',')",
+        ))
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        "0.125,0.25,0.375"
+    );
+}
