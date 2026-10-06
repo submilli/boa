@@ -322,6 +322,13 @@ impl<'ast> boa_ast::visitor::Visitor<'ast> for ModuleRequestsVisitor<'_> {
 }
 
 impl SourceTextModule {
+    pub(super) fn evaluation_succeeded(&self) -> bool {
+        matches!(
+            &*self.status.borrow(),
+            ModuleStatus::Evaluated { error: None, .. }
+        )
+    }
+
     /// Creates a new `SourceTextModule` from a parsed `ModuleSource`.
     ///
     /// Contains part of the abstract operation [`ParseModule`][parse].

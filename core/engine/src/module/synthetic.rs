@@ -188,6 +188,11 @@ impl std::fmt::Debug for SyntheticModule {
 }
 
 impl SyntheticModule {
+    pub(super) fn evaluation_succeeded(&self) -> bool {
+        matches!(&*self.state.borrow(), ModuleStatus::Evaluated { promise, .. }
+            if promise.state().as_fulfilled().is_some())
+    }
+
     /// Abstract operation [`SetSyntheticModuleExport ( module, exportName, exportValue )`][spec].
     ///
     /// Sets or changes the exported value for `exportName` in the synthetic module.

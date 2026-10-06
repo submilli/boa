@@ -566,6 +566,19 @@ impl Module {
         }
     }
 
+    /// Whether this module finished evaluation successfully, including top-level await.
+    ///
+    /// This only reads module state; it does not load, evaluate, or run jobs.
+    /// Success describes this module's execution, not the completion of every
+    /// member of a cyclic dependency graph.
+    #[must_use]
+    pub fn evaluation_succeeded(&self) -> bool {
+        match self.kind() {
+            ModuleKind::SourceText(src) => src.evaluation_succeeded(),
+            ModuleKind::Synthetic(synth) => synth.evaluation_succeeded(),
+        }
+    }
+
     /// Abstract method [`Evaluate()`][spec].
     ///
     /// Evaluates this module, returning a promise for the result of the evaluation of this module
@@ -979,4 +992,45 @@ fn test_module_request_attribute_sorting() {
     assert_eq!(request1, request2);
     assert_eq!(request1.attributes()[0].key(), &js_string!("key1"));
     assert_eq!(request1.attributes()[1].key(), &js_string!("key2"));
+}
+
+#[test]
+fn evaluation_observation_does_not_complete_pending_or_rejected_modules() {
+    let mut context = Context::default();
+    let module = Module::parse(
+        Source::from_bytes(
+            "await new Promise(resolve => globalThis.finish = resolve); export const value = 1",
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    assert!(!module.evaluation_succeeded());
+    let promise = module.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+    assert!(matches!(promise.state(), PromiseState::Pending));
+    assert!(!module.evaluation_succeeded());
+    context.eval(Source::from_bytes("finish()")).unwrap();
+    context.run_jobs().unwrap();
+    assert!(module.evaluation_succeeded());
+    let rejected = Module::parse(
+        Source::from_bytes("await Promise.reject('no')"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let promise = rejected.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+    assert!(promise.state().as_rejected().is_some());
+    assert!(!rejected.evaluation_succeeded());
+    let sync = Module::parse(
+        Source::from_bytes("export const value = 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let promise = sync.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+    assert!(promise.state().as_fulfilled().is_some());
+    assert!(sync.evaluation_succeeded());
 }
