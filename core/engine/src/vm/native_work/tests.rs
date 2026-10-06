@@ -239,3 +239,37 @@ fn native_work_admits_array_truncation_before_changing_length() {
         &mut context,
     );
 }
+
+#[test]
+fn native_work_preserves_constant_time_dense_pop() {
+    let mut context = Context::default();
+    run_test_actions_with(
+        [TestAction::run(
+            "var numbers=[1,2,3];var floats=[1.5,2.5];var objects=[{},{}]",
+        )],
+        &mut context,
+    );
+    context.runtime_limits_mut().set_native_iteration_limit(0);
+    context.runtime_limits_mut().set_native_allocation_limit(0);
+    run_test_actions_with(
+        [
+            TestAction::assert_eq("numbers.pop()", 3),
+            TestAction::assert_eq("numbers.pop()", 2),
+            TestAction::assert_eq("numbers.pop()", 1),
+            TestAction::assert("numbers.length===0 && !(0 in numbers)"),
+            TestAction::assert_eq("floats.pop()", 2.5),
+            TestAction::assert("objects.pop()!==undefined && objects.length===1"),
+        ],
+        &mut context,
+    );
+    context.runtime_limits_mut().set_native_iteration_limit(100);
+    context
+        .runtime_limits_mut()
+        .set_native_allocation_limit(1024);
+    run_test_actions_with(
+        [TestAction::assert(
+            "(()=>{const a=[1];Object.defineProperty(a,0,{get(){a[2]=3;return 1},configurable:true});return a.pop()===1 && a.length===0 && !(2 in a)})()",
+        )],
+        &mut context,
+    );
+}

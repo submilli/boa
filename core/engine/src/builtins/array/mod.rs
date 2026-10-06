@@ -303,11 +303,19 @@ impl Array {
                     .array()
                     .shape()
                     .to_addr_usize()
-                && borrowed_object.properties().storage[0]
+                && (borrowed_object.properties().storage[0]
                     .as_number()
                     .is_some_and(|old_length| len as f64 >= old_length)
+                    || match &borrowed_object.properties().indexed_properties {
+                        IndexedProperties::DenseI32(values) => values.len() as u64 <= len,
+                        IndexedProperties::DenseF64(values) => values.len() as u64 <= len,
+                        IndexedProperties::DenseElement(values) => values.len() as u64 <= len,
+                        IndexedProperties::SparseElement(_)
+                        | IndexedProperties::SparseProperty(_) => false,
+                    })
             {
-                // Shrinking must use ArraySetLength to remove indexed properties.
+                // A dense tail already removed by pop/shift needs no key scan.
+                // Otherwise shrinking must use ArraySetLength to remove indices.
                 // NOTE: The "length" property is the first element.
                 borrowed_object.properties_mut().storage[0] = JsValue::new(len);
                 return Ok(());
