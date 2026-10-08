@@ -11,6 +11,8 @@ use std::sync::Arc;
 mod errors;
 mod from;
 mod to;
+mod wire;
+pub use wire::StorageWireError;
 
 /// Convenience method to avoid copy-pasting the same message.
 #[inline]
@@ -211,7 +213,8 @@ impl ValueStoreInner {
 /// This follows the rules of the [structured clone algorithm][sca], but does not
 /// require a [`Context`] to copy/move, and can be [`Send`] between threads.
 ///
-/// It is not serializable as it allows recursive values.
+/// Its flat graph preserves recursive values. Storage-only graphs can cross
+/// isolated contexts using the versioned, bounded storage byte transport.
 ///
 /// To transform a [`JsValue`] into a [`JsValueStore`], the application MUST
 /// pass in the context of the initial value. To transform it back to a

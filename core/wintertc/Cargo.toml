@@ -11,7 +11,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-boa_engine.workspace = true
+# Storage transport covers every standard typed-array kind, including Float16.
+boa_engine = { workspace = true, features = ["float16"] }
 boa_gc.workspace = true
 base64.workspace = true
 comfy-table.workspace = true
