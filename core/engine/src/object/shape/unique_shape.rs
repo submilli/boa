@@ -233,6 +233,12 @@ impl UniqueShape {
         self.property_table().borrow().keys()
     }
 
+    /// Refuse a key snapshot before cloning when it exceeds admission.
+    pub(crate) fn keys_bounded(&self, limit: usize) -> Option<Vec<PropertyKey>> {
+        let table = self.property_table().borrow();
+        (table.keys.len() <= limit).then(|| table.keys())
+    }
+
     /// Return location in memory of the [`UniqueShape`].
     pub(crate) fn to_addr_usize(&self) -> usize {
         let ptr: *const _ = self.inner.as_ref();

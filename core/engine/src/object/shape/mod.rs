@@ -203,6 +203,17 @@ impl Shape {
         }
     }
 
+    /// Return string and symbol keys in insertion order only if their count
+    /// fits `limit`. Admission happens before allocating or cloning keys.
+    /// Indexed properties are stored separately in the object's property map.
+    #[must_use]
+    pub fn keys_bounded(&self, limit: usize) -> Option<Vec<PropertyKey>> {
+        match &self.inner {
+            Inner::Shared(shape) => shape.keys_bounded(limit),
+            Inner::Unique(shape) => shape.keys_bounded(limit),
+        }
+    }
+
     /// Return location in memory of the [`Shape`].
     #[inline]
     #[must_use]

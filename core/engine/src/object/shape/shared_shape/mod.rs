@@ -455,6 +455,11 @@ impl SharedShape {
         property_table.keys_cloned_n(self.property_count())
     }
 
+    /// Refuse a key snapshot before cloning when it exceeds admission.
+    pub(crate) fn keys_bounded(&self, limit: usize) -> Option<Vec<PropertyKey>> {
+        (self.property_count() as usize <= limit).then(|| self.keys())
+    }
+
     /// Returns a new [`UniqueShape`] with the properties of the [`SharedShape`].
     pub(crate) fn to_unique(&self) -> UniqueShape {
         UniqueShape::new(
