@@ -13,6 +13,7 @@ mod iterators;
 mod job;
 mod operators;
 mod promise;
+mod scope_bindings;
 mod spread;
 mod to_string;
 
